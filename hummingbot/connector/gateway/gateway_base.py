@@ -283,7 +283,7 @@ class GatewayBase(ConnectorBase):
             self._token_data[symbol] = t
 
     def get_taker_order_type(self):
-        return OrderType.LIMIT
+        return OrderType.AMM_SWAP
 
     def get_order_price_quantum(self, trading_pair: str, price: Decimal) -> Decimal:
         return Decimal("1e-15")

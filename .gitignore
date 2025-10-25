@@ -96,3 +96,17 @@ coverage.xml
 .env
 
 **/.claude/settings.local.json
+
+# Gateway runtime files
+/gateway-files/
+/gateway_files.backup/
+
+# User data and runtime files
+/userdata/
+
+# Installation files
+Miniconda3-*.sh
+
+# Submodule directories (managed separately)
+/gateway/
+/hummingbot-site/

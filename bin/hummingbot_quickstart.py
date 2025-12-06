@@ -27,6 +27,7 @@ from hummingbot.client.config.config_helpers import (
 from hummingbot.client.config.security import Security
 from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.client.settings import (
+    GATEWAY_CONNECTORS,
     SCRIPT_STRATEGIES_PATH,
     SCRIPT_STRATEGY_CONF_DIR_PATH,
     STRATEGIES_CONF_DIR_PATH,
@@ -109,6 +110,19 @@ async def quick_start(args: argparse.Namespace, secrets_manager: BaseSecretsMana
         client_config_map.mqtt_bridge.mqtt_autostart = True
 
     AllConnectorSettings.initialize_paper_trade_settings(client_config_map.paper_trade.paper_trade_exchanges)
+
+    # Initialize Gateway connectors BEFORE loading strategy (for headless mode with DEX strategies)
+    if args.headless and args.config_file_name:
+        from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
+        gateway = GatewayHttpClient.get_instance(client_config_map.gateway)
+        gateway.start_monitor()
+        logging.getLogger().info("Waiting for Gateway connectors to initialize...")
+        await gateway.wait_for_online_status(max_tries=60)  # Wait up to 120 seconds
+        if gateway.ready:
+            await gateway.ensure_gateway_connectors_registered()
+            logging.getLogger().info(f"Gateway connectors registered: {len(GATEWAY_CONNECTORS)} connectors")
+        else:
+            logging.getLogger().warning("Gateway not available - DEX connectors may not work")
 
     # Create unified application that handles both headless and UI modes
     hb = HummingbotApplication.main_application(client_config_map=client_config_map, headless_mode=args.headless)

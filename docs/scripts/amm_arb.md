@@ -231,6 +231,7 @@ The strategy is configured through the following parameters:
 | `market_1_slippage_buffer` | decimal | Slippage buffer for market 1 (percentage) | 0.0 or 1.0 |
 | `market_2_slippage_buffer` | decimal | Slippage buffer for market 2 (percentage) | 0.0 or 1.0 |
 | `concurrent_orders_submission` | boolean | Whether to submit both orders simultaneously | False |
+| `wallet_address` | string | Optional wallet address for Gateway connectors. Use one wallet per active EVM bot to avoid nonce conflicts. | `null` |
 | `gateway_transaction_cancel_interval` | integer | Time before canceling unconfirmed blockchain transactions (seconds) | 600 |
 | `rate_oracle_enabled` | boolean | Whether to use rate oracle for cross-asset conversions | True |
 
@@ -293,6 +294,11 @@ The performance of the AMM Arb strategy can be optimized by tuning these key par
    - Shorter intervals reduce the time capital is tied up in pending transactions
    - Longer intervals reduce the chance of canceling transactions that might eventually be processed
    - Optimal setting depends on network congestion patterns and gas price strategy
+
+6. **Wallet Isolation for Gateway Connectors**:
+   - If multiple active bots trade on the same EVM network, do not share one wallet across them
+   - Use `wallet_address` to bind each bot to its own wallet while still sharing one Gateway instance
+   - This reduces nonce conflicts such as `nonce too low` and `replacement transaction underpriced`
 
 ### Risk Management
 

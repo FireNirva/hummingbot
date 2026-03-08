@@ -1,10 +1,8 @@
 services:
   hummingbot:
     container_name: hummingbot
-    image: firenirva/hummingbot:latest
-    # build: # Uncomment this build section and comment image to build Hummingbot locally
-    #   context: .
-    #   dockerfile: Dockerfile
+    # 使用你的 Docker Hub 镜像（包含 AMM_SWAP 和其他修改）
+    image: firenirva/hummingbot:latest  # ⚠️ 替换为你的实际用户名
     volumes:
       - ./conf:/home/hummingbot/conf
       - ./conf/connectors:/home/hummingbot/conf/connectors
@@ -24,19 +22,15 @@ services:
     tty: true
     stdin_open: true
     network_mode: host
-    environment:
-      - CONFIG_PASSWORD=12345678
-      # - HEADLESS_MODE=true
-      # - CONFIG_FILE_NAME=conf_amm_arb_IRON.yml
+  #  environment:
+  #    - CONFIG_PASSWORD=你的新密码
+  #    - CONFIG_FILE_NAME=conf_amm_arb_GPS.yml
 
   gateway:
-    profiles: ["gateway"]
     restart: always
     container_name: gateway
-    image: firenirva/gateway:latest
-    # build:
-    #   context: ./gateway
-    #   dockerfile: Dockerfile
+    # 使用你的 Docker Hub 镜像（包含 gas fee 优化）
+    image: firenirva/gateway:latest  # ⚠️ 替换为你的实际用户名
     ports:
       - "15888:15888"
     volumes:
@@ -46,3 +40,4 @@ services:
     environment:
       - GATEWAY_PASSPHRASE=admin
       - DEV=true
+

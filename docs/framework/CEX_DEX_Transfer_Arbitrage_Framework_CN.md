@@ -43,23 +43,23 @@
 
 ### 数学符号表示
 
-- **\( \boldsymbol{P^{CEX}} \):** CEX 上的资产价格
-- **\( \boldsymbol{P^{DEX}} \):** DEX 上的资产价格
-- **\( \boldsymbol{f^{CEX}} \):** CEX 交易费率
-- **\( \boldsymbol{f^{DEX}} \):** DEX 交易费率（通常为固定百分比）
-- **\( \boldsymbol{f^{W}} \):** 提款费率（从 CEX 转出）
-- **\( \boldsymbol{f^{D}} \):** 存款费率（转入 CEX）
-- **\( \boldsymbol{G} \):** gas 成本（以 gas 单位计）
-- **\( \boldsymbol{G_p} \):** gas 价格（以 ETH/gas 单位计）
-- **\( \boldsymbol{T^{CEX}} \):** CEX 执行延迟
-- **\( \boldsymbol{T^{DEX}} \):** DEX 执行延迟（区块确认时间）
-- **\( \boldsymbol{T^{W}} \):** CEX 提款处理时间
-- **\( \boldsymbol{T^{D}} \):** CEX 存款确认时间
-- **\( \boldsymbol{\sigma_P} \):** 价格波动率
-- **\( \boldsymbol{\tau} \):** 总执行时间（包括转账延迟）
-- **\( \boldsymbol{\lambda} \):** 风险偏好系数
-- **\( \boldsymbol{R^{CEX}} \):** CEX 流动性储备深度
-- **\( \boldsymbol{R^{DEX}} \):** DEX 流动性储备
+- **$ \mathbf{P^{CEX}} $:** CEX 上的资产价格
+- **$ \mathbf{P^{DEX}} $:** DEX 上的资产价格
+- **$ \mathbf{f^{CEX}} $:** CEX 交易费率
+- **$ \mathbf{f^{DEX}} $:** DEX 交易费率（通常为固定百分比）
+- **$ \mathbf{f^{W}} $:** 提款费率（从 CEX 转出）
+- **$ \mathbf{f^{D}} $:** 存款费率（转入 CEX）
+- **$ \mathbf{G} $:** gas 成本（以 gas 单位计）
+- **$ \mathbf{G_p} $:** gas 价格（以 ETH/gas 单位计）
+- **$ \mathbf{T^{CEX}} $:** CEX 执行延迟
+- **$ \mathbf{T^{DEX}} $:** DEX 执行延迟（区块确认时间）
+- **$ \mathbf{T^{W}} $:** CEX 提款处理时间
+- **$ \mathbf{T^{D}} $:** CEX 存款确认时间
+- **$ \mathbf{\sigma_P} $:** 价格波动率
+- **$ \mathbf{\tau} $:** 总执行时间（包括转账延迟）
+- **$ \mathbf{\lambda} $:** 风险偏好系数
+- **$ \mathbf{R^{CEX}} $:** CEX 流动性储备深度
+- **$ \mathbf{R^{DEX}} $:** DEX 流动性储备
 
 ### 市场结构差异
 
@@ -104,27 +104,31 @@ CEX 和 DEX 之间的资产转账涉及以下机制：
 
 CEX-DEX 套利的基本利润可以表示为：
 
-**情景 1: 当 \( P^{DEX} > P^{CEX} \)**
+**情景 1: 当 $ P^{DEX} > P^{CEX} $**
 - 在 CEX 购买资产
 - 转账至 DEX 钱包
 - 在 DEX 出售资产
 
 潜在利润：
-\[
-\Pi_{raw} = Q \cdot P^{DEX} \cdot (1-f^{DEX}) - Q \cdot P^{CEX} \cdot (1+f^{CEX}) - C_{transfer}
-\]
 
-**情景 2: 当 \( P^{CEX} > P^{DEX} \)**
+$$
+\Pi_{raw} = Q \cdot P^{DEX} \cdot (1-f^{DEX}) - Q \cdot P^{CEX} \cdot (1+f^{CEX}) - C_{transfer}
+$$
+
+
+**情景 2: 当 $ P^{CEX} > P^{DEX} $**
 - 在 DEX 购买资产
 - 转账至 CEX
 - 在 CEX 出售资产
 
 潜在利润：
-\[
-\Pi_{raw} = Q \cdot P^{CEX} \cdot (1-f^{CEX}) - Q \cdot P^{DEX} \cdot (1+f^{DEX}) - C_{transfer}
-\]
 
-其中 \( C_{transfer} \) 包括 gas 成本和提款/存款费用。
+$$
+\Pi_{raw} = Q \cdot P^{CEX} \cdot (1-f^{CEX}) - Q \cdot P^{DEX} \cdot (1+f^{DEX}) - C_{transfer}
+$$
+
+
+其中 $ C_{transfer} $ 包括 gas 成本和提款/存款费用。
 
 ## 转账成本分析
 
@@ -132,62 +136,80 @@ CEX-DEX 套利的基本利润可以表示为：
 
 DEX 交易和转账涉及的链上成本：
 
-\[
-C_{on-chain} = G \cdot G_p
-\]
 
-其中 \( G \) 是以 gas 单位计的 gas 消耗，\( G_p \) 是当前 gas 价格。
+$$
+C_{on-chain} = G \cdot G_p
+$$
+
+
+其中 $ G $ 是以 gas 单位计的 gas 消耗，$ G_p $ 是当前 gas 价格。
 
 DEX 交易的总 gas 成本：
-\[
+
+$$
 G_{DEX} = G_{base} + G_{DEX-specific}
-\]
+$$
+
 
 转账操作的 gas 成本：
-\[
+
+$$
 G_{transfer} = G_{base} + G_{token-specific}
-\]
+$$
+
 
 ### 链下转账费用
 
 CEX 提款费用通常分为以下几类:
 
 1. **固定费用模型:**
-   \[
-   f^W_{fixed} = c
-   \]
+   
+$$
+f^W_{fixed} = c
+$$
+
    
 2. **百分比费用模型:**
-   \[
-   f^W_{percentage} = Q \cdot \alpha
-   \]
+   
+$$
+f^W_{percentage} = Q \cdot \alpha
+$$
+
    
 3. **混合费用模型:**
-   \[
-   f^W_{hybrid} = \max(c_{min}, Q \cdot \alpha)
-   \]
+   
+$$
+f^W_{hybrid} = \max(c_{min}, Q \cdot \alpha)
+$$
+
 
 有效提款成本:
-\[
-C_{withdrawal} = f^W + C_{opportunity}
-\]
 
-其中 \( C_{opportunity} \) 是在提款过程中的机会成本。
+$$
+C_{withdrawal} = f^W + C_{opportunity}
+$$
+
+
+其中 $ C_{opportunity} $ 是在提款过程中的机会成本。
 
 ### 时间成本
 
 总执行时间由以下组成:
 
-\[
+
+$$
 T_{total} = T^{CEX} + T^{W} + T^{blockchain} + T^{D}
-\]
+$$
+
 
 时间相关的风险成本:
-\[
-C_{time} = Q \cdot \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda
-\]
 
-其中 \( \sigma_P \) 是价格波动率，\( \lambda \) 是风险敏感度。
+$$
+C_{time} = Q \cdot \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda
+$$
+
+
+其中 $ \sigma_P $ 是价格波动率，$ \lambda $ 是风险敏感度。
 
 ## 风险调整框架
 
@@ -195,54 +217,71 @@ C_{time} = Q \cdot \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda
 
 考虑执行风险的调整后利润:
 
-\[
+
+$$
 \Pi_{adjusted} = \Pi_{raw} - Q \cdot \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda
-\]
+$$
+
 
 实际最小价格差异阈值:
-\[
+
+$$
 \frac{P_{high}}{P_{low}} > \frac{1+f_{buy}}{1-f_{sell}} + \frac{C_{transfer}}{Q \cdot P_{low}} + \frac{\lambda \cdot \sigma_P \cdot \sqrt{T_{total}}}{P_{low}}
-\]
+$$
+
 
 ### 净敞口计算
 
 执行过程中的净敞口:
-\[
+
+$$
 E(t) = Q_{CEX}(t) \cdot P^{CEX}(t) + Q_{DEX}(t) \cdot P^{DEX}(t) + Q_{transit}(t) \cdot P^{avg}(t)
-\]
+$$
+
 
 最大敞口约束:
-\[
+
+$$
 \max_{t} |E(t)| \leq E_{max}
-\]
+$$
+
 
 ### 流动性风险分析
 
 滑点模型:
 
 **CEX 滑点:**
-\[
+
+$$
 S^{CEX}(Q) = \beta^{CEX} \cdot \frac{Q}{R^{CEX}}
-\]
+$$
+
 
 **DEX 滑点:**
-\[
+
+$$
 S^{DEX}(Q) = \frac{Q}{R^{DEX} + Q}
-\]
+$$
+
 
 考虑滑点的有效价格:
-\[
-P^{CEX}_{effective} = P^{CEX} \cdot (1 \pm S^{CEX}(Q))
-\]
 
-\[
+$$
+P^{CEX}_{effective} = P^{CEX} \cdot (1 \pm S^{CEX}(Q))
+$$
+
+
+$$
 P^{DEX}_{effective} = P^{DEX} \cdot (1 \pm S^{DEX}(Q))
-\]
+$$
+
 
 修改后的利润公式:
-\[
+
+$$
 \Pi_{adj} = Q \cdot P^{DEX} \cdot (1-f^{DEX}) \cdot (1-S^{DEX}(Q)) - Q \cdot P^{CEX} \cdot (1+f^{CEX}) \cdot (1+S^{CEX}(Q)) - C_{transfer}
-\]
+$$
+
 
 ## 最优执行策略
 
@@ -250,34 +289,44 @@ P^{DEX}_{effective} = P^{DEX} \cdot (1 \pm S^{DEX}(Q))
 
 对于多路径选择，计算每条路径的风险调整后的利润:
 
-\[
+
+$$
 \Pi^i_{adjusted} = \Pi^i_{raw} - Q^i \cdot \sigma^i_P \cdot \sqrt{T^i_{total}} \cdot \lambda
-\]
+$$
+
 
 选择最大化总利润的路径组合:
-\[
+
+$$
 \max \sum_i \Pi^i_{adjusted}
-\]
+$$
+
 
 满足资本约束:
-\[
+
+$$
 \sum_i Q^i \cdot P^i \leq C_{available}
-\]
+$$
+
 
 ### 最优交易规模
 
 考虑滑点和转账成本的最优交易规模:
 
-\[
-Q_{optimal} = \arg\max_Q \left\{ Q \cdot \Delta P_{effective} - C_{transfer} - Q \cdot \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda \right\}
-\]
 
-其中 \( \Delta P_{effective} \) 是考虑滑点后的有效价格差异。
+$$
+Q_{optimal} = \arg\max_Q \left\{ Q \cdot \Delta P_{effective} - C_{transfer} - Q \cdot \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda \right\}
+$$
+
+
+其中 $ \Delta P_{effective} $ 是考虑滑点后的有效价格差异。
 
 对于特定的滑点模型，近似解为:
-\[
+
+$$
 Q_{optimal} \approx \sqrt{\frac{C_{transfer} \cdot R^{DEX}}{P^{DEX} - P^{CEX} - P^{DEX} \cdot f^{DEX} - P^{CEX} \cdot f^{CEX} - \sigma_P \cdot \sqrt{T_{total}} \cdot \lambda}}
-\]
+$$
+
 
 ### 最优执行顺序
 
@@ -288,104 +337,134 @@ Q_{optimal} \approx \sqrt{\frac{C_{transfer} \cdot R^{DEX}}{P^{DEX} - P^{CEX} - 
    - 下降趋势: 先确保转账资金就位
    
 2. **CEX-DEX 相关性分析:**
-   如果价格变动相关性为 \( \rho \):
-   \[
-   \text{Risk}_{combined} = \sqrt{\sigma^2_{CEX} + \sigma^2_{DEX} + 2 \cdot \rho \cdot \sigma_{CEX} \cdot \sigma_{DEX}}
-   \]
+   如果价格变动相关性为 $ \rho $:
+   
+$$
+\text{Risk}_{combined} = \sqrt{\sigma^2_{CEX} + \sigma^2_{DEX} + 2 \cdot \rho \cdot \sigma_{CEX} \cdot \sigma_{DEX}}
+$$
+
 
 3. **批处理与分批执行比较:**
    分批执行的预期利润:
-   \[
-   \Pi_{batched} = \sum_i \Pi_i - \sum_i C_{transfer,i}
-   \]
+   
+$$
+\Pi_{batched} = \sum_i \Pi_i - \sum_i C_{transfer,i}
+$$
+
    
    单次执行的预期利润:
-   \[
-   \Pi_{single} = \Pi_{total} - C_{transfer}
-   \]
+   
+$$
+\Pi_{single} = \Pi_{total} - C_{transfer}
+$$
+
 
 ## 多资产多平台扩展
 
 ### 资产相关性分析
 
 不同资产对套利的相关性矩阵:
-\[
+
+$$
 \rho_{i,j} = \frac{\text{Cov}(r_i, r_j)}{\sigma_i \cdot \sigma_j}
-\]
+$$
+
 
 组合风险:
-\[
+
+$$
 \sigma_{portfolio} = \sqrt{\sum_i \sum_j w_i \cdot w_j \cdot \sigma_i \cdot \sigma_j \cdot \rho_{i,j}}
-\]
+$$
+
 
 ### 组合套利模型
 
 多资产套利的总利润优化:
-\[
+
+$$
 \max \sum_i w_i \cdot \Pi_i
-\]
+$$
+
 
 满足:
-\[
-\sum_i w_i = 1
-\]
 
-\[
+$$
+\sum_i w_i = 1
+$$
+
+
+$$
 \sigma_{portfolio} \leq \sigma_{max}
-\]
+$$
+
 
 ### 风险分散策略
 
 有效分散的套利头寸分配:
-\[
+
+$$
 w_i = \frac{\Pi_i / \sigma_i}{\sum_j \Pi_j / \sigma_j} \cdot \frac{\sigma_{target}}{\sigma_{portfolio}}
-\]
+$$
+
 
 风险平价分配:
-\[
-w_i \propto \frac{1}{\sigma_i \cdot \text{MR}_i}
-\]
 
-其中 \( \text{MR}_i \) 是资产 \( i \) 对组合风险的边际贡献。
+$$
+w_i \propto \frac{1}{\sigma_i \cdot \text{MR}_i}
+$$
+
+
+其中 $ \text{MR}_i $ 是资产 $ i $ 对组合风险的边际贡献。
 
 ## 实施考虑
 
 ### 存款管理
 
 资本分配优化:
-\[
-w^{CEX} = \frac{\sigma_{DEX}}{\sigma_{CEX} + \sigma_{DEX}}
-\]
 
-\[
+$$
+w^{CEX} = \frac{\sigma_{DEX}}{\sigma_{CEX} + \sigma_{DEX}}
+$$
+
+
+$$
 w^{DEX} = \frac{\sigma_{CEX}}{\sigma_{CEX} + \sigma_{DEX}}
-\]
+$$
+
 
 重新平衡阈值:
-\[
+
+$$
 \left| \frac{C^{CEX}}{C^{DEX}} - \frac{w^{CEX}}{w^{DEX}} \right| > \delta_{rebalance}
-\]
+$$
+
 
 ### API集成
 
 CEX API 限流管理:
-\[
+
+$$
 \text{Request Rate} \leq \min\left(\text{Rate Limit}, \frac{\text{Daily Limit}}{\text{Hours of Operation}}\right)
-\]
+$$
+
 
 故障转移和冗余:
-\[
-\text{Reliability} = 1 - \prod_i (1 - r_i)
-\]
 
-其中 \( r_i \) 是单个系统的可靠性。
+$$
+\text{Reliability} = 1 - \prod_i (1 - r_i)
+$$
+
+
+其中 $ r_i $ 是单个系统的可靠性。
 
 ### 智能合约设计
 
 合约优化目标:
-\[
+
+$$
 \min G_{total} = G_{execution} + G_{verification} + G_{safety}
-\]
+$$
+
 
 自动化套利合约的理想属性:
 1. 原子性执行
@@ -396,15 +475,17 @@ CEX API 限流管理:
 ### 监控和警报系统
 
 关键监控指标:
-- 价格差异: \( |P^{DEX} - P^{CEX}| / \min(P^{DEX}, P^{CEX}) \)
-- 净敞口: \( |E(t)| / C_{total} \)
-- 执行时间: \( T_{actual} / T_{expected} \)
-- 利润率: \( \Pi_{actual} / \Pi_{expected} \)
+- 价格差异: $ |P^{DEX} - P^{CEX}| / \min(P^{DEX}, P^{CEX}) $
+- 净敞口: $ |E(t)| / C_{total} $
+- 执行时间: $ T_{actual} / T_{expected} $
+- 利润率: $ \Pi_{actual} / \Pi_{expected} $
 
 动态阈值设置:
-\[
+
+$$
 \text{Alert Threshold} = \mu_{baseline} \pm n \cdot \sigma_{baseline}
-\]
+$$
+
 
 ## 结论
 

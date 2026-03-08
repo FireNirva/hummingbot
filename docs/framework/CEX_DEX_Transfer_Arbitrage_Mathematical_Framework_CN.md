@@ -47,68 +47,70 @@
 
 ### 数学符号表示
 
-- **\( \boldsymbol{P_C} \):** CEX上的资产价格
-- **\( \boldsymbol{P_D} \):** DEX上的资产价格
-- **\( \boldsymbol{f_C} \):** CEX交易费率
-- **\( \boldsymbol{f_D} \):** DEX交易费率
-- **\( \boldsymbol{f_{W,C}} \):** CEX提款费率
-- **\( \boldsymbol{f_{D,C}} \):** CEX存款费率
-- **\( \boldsymbol{G} \):** DEX上的gas成本
-- **\( \boldsymbol{Q} \):** 交易量
-- **\( \boldsymbol{Q_{max,C}} \):** CEX上的最大交易量
-- **\( \boldsymbol{Q_{max,D}} \):** DEX上的最大交易量（流动性约束）
-- **\( \boldsymbol{\tau_{C,D}} \):** CEX到DEX的转账时间
-- **\( \boldsymbol{\tau_{D,C}} \):** DEX到CEX的转账时间
-- **\( \boldsymbol{\Delta P} \):** 价格差异 \( \Delta P = |P_C - P_D| \)
-- **\( \boldsymbol{\sigma_C} \):** CEX价格波动率
-- **\( \boldsymbol{\sigma_D} \):** DEX价格波动率
-- **\( \boldsymbol{\rho} \):** CEX和DEX价格的相关系数
-- **\( \boldsymbol{C_{transfer}} \):** 转账成本
-- **\( \boldsymbol{r_{risk}} \):** 风险调整因子
-- **\( \boldsymbol{T_{cycle}} \):** 完整套利周期时间
-- **\( \boldsymbol{C_{total}} \):** 可用总资本
-- **\( \boldsymbol{r_{opportunity}} \):** 资金机会成本率
+- **$ \mathbf{P_C} $:** CEX上的资产价格
+- **$ \mathbf{P_D} $:** DEX上的资产价格
+- **$ \mathbf{f_C} $:** CEX交易费率
+- **$ \mathbf{f_D} $:** DEX交易费率
+- **$ \mathbf{f_{W,C}} $:** CEX提款费率
+- **$ \mathbf{f_{D,C}} $:** CEX存款费率
+- **$ \mathbf{G} $:** DEX上的gas成本
+- **$ \mathbf{Q} $:** 交易量
+- **$ \mathbf{Q_{max,C}} $:** CEX上的最大交易量
+- **$ \mathbf{Q_{max,D}} $:** DEX上的最大交易量（流动性约束）
+- **$ \mathbf{\tau_{C,D}} $:** CEX到DEX的转账时间
+- **$ \mathbf{\tau_{D,C}} $:** DEX到CEX的转账时间
+- **$ \mathbf{\Delta P} $:** 价格差异 $ \Delta P = |P_C - P_D| $
+- **$ \mathbf{\sigma_C} $:** CEX价格波动率
+- **$ \mathbf{\sigma_D} $:** DEX价格波动率
+- **$ \mathbf{\rho} $:** CEX和DEX价格的相关系数
+- **$ \mathbf{C_{transfer}} $:** 转账成本
+- **$ \mathbf{r_{risk}} $:** 风险调整因子
+- **$ \mathbf{T_{cycle}} $:** 完整套利周期时间
+- **$ \mathbf{C_{total}} $:** 可用总资本
+- **$ \mathbf{r_{opportunity}} $:** 资金机会成本率
 
 ### 市场结构与差异
 
 CEX和DEX的基本结构差异影响套利执行：
 
 1. **订单执行机制:**
-   - CEX: \( P_C(Q) = P_C^{base} \pm \lambda_C \cdot Q \)，其中\( \lambda_C \)是市场深度参数
-   - DEX: \( P_D(Q) = \frac{y}{x} \cdot \frac{x}{x-Q} = \frac{y}{x-Q} \)（对于恒定乘积AMM）
+   - CEX: $ P_C(Q) = P_C^{base} \pm \lambda_C \cdot Q $，其中$ \lambda_C $是市场深度参数
+   - DEX: $ P_D(Q) = \frac{y}{x} \cdot \frac{x}{x-Q} = \frac{y}{x-Q} $（对于恒定乘积AMM）
 
 2. **流动性特征:**
-   - CEX流动性效率：\( \varepsilon_C = \frac{Q}{Q \cdot (1 + \lambda_C \cdot Q/P_C)} \)
-   - DEX流动性效率：\( \varepsilon_D = \frac{Q}{Q \cdot (1 + \frac{Q}{x-Q})} \)
+   - CEX流动性效率：$ \varepsilon_C = \frac{Q}{Q \cdot (1 + \lambda_C \cdot Q/P_C)} $
+   - DEX流动性效率：$ \varepsilon_D = \frac{Q}{Q \cdot (1 + \frac{Q}{x-Q})} $
 
 3. **价格发现:**
-   - CEX价格一般领先DEX价格，时间滞后为\( \delta t \)
-   - 相关性模型：\( P_D(t) \approx \alpha \cdot P_C(t-\delta t) + (1-\alpha) \cdot P_D(t-1) + \epsilon_t \)
+   - CEX价格一般领先DEX价格，时间滞后为$ \delta t $
+   - 相关性模型：$ P_D(t) \approx \alpha \cdot P_C(t-\delta t) + (1-\alpha) \cdot P_D(t-1) + \epsilon_t $
 
 ### 转账机制与约束
 
 1. **转账延迟分布:**
-   - CEX到DEX：\( \tau_{C,D} \sim N(\mu_{C,D}, \sigma_{C,D}^2) \)
-   - DEX到CEX：\( \tau_{D,C} \sim N(\mu_{D,C}, \sigma_{D,C}^2) \)
+   - CEX到DEX：$ \tau_{C,D} \sim N(\mu_{C,D}, \sigma_{C,D}^2) $
+   - DEX到CEX：$ \tau_{D,C} \sim N(\mu_{D,C}, \sigma_{D,C}^2) $
 
 2. **转账容量约束:**
-   - 最小转账额：\( Q \geq Q_{min} \)
-   - 最大单次转账额：\( Q \leq Q_{max,transfer} \)
-   - 时间窗口内总转账限制：\( \sum_{i=1}^{n} Q_i \leq Q_{max,period} \) 在时间\( T_{period} \)内
+   - 最小转账额：$ Q \geq Q_{min} $
+   - 最大单次转账额：$ Q \leq Q_{max,transfer} $
+   - 时间窗口内总转账限制：$ \sum_{i=1}^{n} Q_i \leq Q_{max,period} $ 在时间$ T_{period} $内
 
 3. **转账成功率:**
-   \[
-   p_{success} = \min\left(1, \frac{G_{paid}}{G_{required}} \cdot \frac{1}{\lambda \cdot \text{congestion}}\right) \cdot (1 - p_{CEX,reject})
-   \]
-   其中\( p_{CEX,reject} \)是CEX拒绝提款的概率。
+   
+$$
+p_{success} = \min\left(1, \frac{G_{paid}}{G_{required}} \cdot \frac{1}{\lambda \cdot \text{congestion}}\right) \cdot (1 - p_{CEX,reject})
+$$
+
+   其中$ p_{CEX,reject} $是CEX拒绝提款的概率。
 
 ### 完整套利周期模型
 
 一个完整的套利周期包括以下阶段：
 
-1. **检测阶段:** 识别价格差异：\( \Delta P = |P_C - P_D| > \Delta P_{threshold} \)
+1. **检测阶段:** 识别价格差异：$ \Delta P = |P_C - P_D| > \Delta P_{threshold} $
 
-2. **转账决策:** 如果\( P_C < P_D \)，则从CEX转到DEX；如果\( P_D < P_C \)，则反之
+2. **转账决策:** 如果$ P_C < P_D $，则从CEX转到DEX；如果$ P_D < P_C $，则反之
 
 3. **执行过程:**
    - 在起始平台上购买资产
@@ -117,9 +119,11 @@ CEX和DEX的基本结构差异影响套利执行：
    - 可选：将收益转回以完成循环
 
 4. **周期时间:**
-   \[
-   T_{cycle} = T_{detect} + T_{execute,source} + \tau_{transfer} + T_{execute,target} + \tau_{return}
-   \]
+   
+$$
+T_{cycle} = T_{detect} + T_{execute,source} + \tau_{transfer} + T_{execute,target} + \tau_{return}
+$$
+
 
 ## 套利利润与成本分析
 
@@ -127,59 +131,73 @@ CEX和DEX的基本结构差异影响套利执行：
 
 假设从低价格平台买入，在高价格平台卖出，则理论利润为：
 
-\[
+
+$$
 \Pi_{theoretical} = Q \cdot (P_{high} - P_{low})
-\]
+$$
+
 
 考虑交易费用后的利润：
 
-\[
+
+$$
 \Pi_{base} = Q \cdot (P_{high} \cdot (1 - f_{high}) - P_{low} \cdot (1 + f_{low}))
-\]
+$$
+
 
 ### 转账成本模型
 
 转账成本包括多个组成部分：
 
-\[
+
+$$
 C_{transfer} = 
 \begin{cases}
 Q \cdot f_{W,C} + G \cdot P_G, & \text{if CEX to DEX} \\
 G \cdot P_G + Q \cdot f_{D,C}, & \text{if DEX to CEX}
 \end{cases}
-\]
+$$
 
-其中\( P_G \)是gas代币的价格。
+
+其中$ P_G $是gas代币的价格。
 
 ### 时间价值与机会成本
 
 在套利周期中，资金的时间价值为：
 
-\[
-C_{time} = C_{total} \cdot r_{opportunity} \cdot \frac{T_{cycle}}{365 \cdot 24 \cdot 60 \cdot 60}
-\]
 
-对于年化机会成本率\( r_{opportunity} \)。
+$$
+C_{time} = C_{total} \cdot r_{opportunity} \cdot \frac{T_{cycle}}{365 \cdot 24 \cdot 60 \cdot 60}
+$$
+
+
+对于年化机会成本率$ r_{opportunity} $。
 
 ### 净利润临界值分析
 
 套利执行的临界条件是：
 
-\[
+
+$$
 \Pi_{net} = \Pi_{base} - C_{transfer} - C_{time} - C_{risk} > 0
-\]
+$$
+
 
 展开为价格差异条件：
 
-\[
+
+$$
 \frac{P_{high}}{P_{low}} > \frac{1 + f_{low} + \frac{C_{transfer} + C_{time} + C_{risk}}{Q \cdot P_{low}}}{1 - f_{high}}
-\]
+$$
+
 
 最小所需价格差异百分比：
 
-\[
+
+$$
 \Delta P\% = \left(\frac{P_{high}}{P_{low}} - 1\right) \cdot 100\% > \left(\frac{1 + f_{low} + \frac{C_{transfer} + C_{time} + C_{risk}}{Q \cdot P_{low}}}{1 - f_{high}} - 1\right) \cdot 100\%
-\]
+$$
+
 
 ## 转账时序与执行优化
 
@@ -187,179 +205,227 @@ C_{time} = C_{total} \cdot r_{opportunity} \cdot \frac{T_{cycle}}{365 \cdot 24 \
 
 转账延迟的统计特性影响策略收益：
 
-\[
-E[\tau_{transfer}] = p_1 \cdot \mu_1 + p_2 \cdot \mu_2 + ... + p_n \cdot \mu_n
-\]
 
-其中\( p_i \)是不同延迟情境的概率，\( \mu_i \)是相应的平均延迟。
+$$
+E[\tau_{transfer}] = p_1 \cdot \mu_1 + p_2 \cdot \mu_2 + ... + p_n \cdot \mu_n
+$$
+
+
+其中$ p_i $是不同延迟情境的概率，$ \mu_i $是相应的平均延迟。
 
 延迟风险调整后的期望利润：
 
-\[
-E[\Pi_{adj}] = E[\Pi_{base} \cdot e^{-\lambda \cdot \tau_{transfer}}] - C_{transfer} - C_{time}
-\]
 
-其中\( \lambda \)是时间折现率参数。
+$$
+E[\Pi_{adj}] = E[\Pi_{base} \cdot e^{-\lambda \cdot \tau_{transfer}}] - C_{transfer} - C_{time}
+$$
+
+
+其中$ \lambda $是时间折现率参数。
 
 ### 价格趋势预测
 
 考虑价格趋势对延迟期间利润的影响：
 
-\[
-E[P_{target}(t + \tau_{transfer})] = P_{target}(t) \cdot e^{\mu \cdot \tau_{transfer}}
-\]
 
-其中\( \mu \)是价格漂移参数。
+$$
+E[P_{target}(t + \tau_{transfer})] = P_{target}(t) \cdot e^{\mu \cdot \tau_{transfer}}
+$$
+
+
+其中$ \mu $是价格漂移参数。
 
 利用ARIMA或GARCH模型的短期价格变动预测：
 
-\[
+
+$$
 \hat{P}_{t+h} = f(P_t, P_{t-1}, ..., P_{t-p}, \epsilon_t, \epsilon_{t-1}, ..., \epsilon_{t-q})
-\]
+$$
+
 
 ### 最优执行路径
 
 决策变量：
-- 转账量\( Q \)
-- 转账时机\( t_{transfer} \)
-- 目标平台执行时机\( t_{execute} \)
+- 转账量$ Q $
+- 转账时机$ t_{transfer} $
+- 目标平台执行时机$ t_{execute} $
 
 优化目标：
-\[
+
+$$
 \max_{Q, t_{transfer}, t_{execute}} E[\Pi_{net}]
-\]
+$$
+
 
 受制于条件：
-\[
+
+$$
 \begin{align}
 Q &\leq \min(Q_{max,source}, Q_{max,target}, Q_{max,transfer}) \\
 t_{execute} &\geq t_{transfer} + \tau_{min} \\
 \Pi_{net} &> 0
 \end{align}
-\]
+$$
+
 
 ### 部分执行与资金分配
 
-将总资本\( C_{total} \)分配为多个批次\( \{Q_1, Q_2, ..., Q_n\} \)以优化执行：
+将总资本$ C_{total} $分配为多个批次$ \{Q_1, Q_2, ..., Q_n\} $以优化执行：
 
-\[
+
+$$
 \sum_{i=1}^{n} Q_i \leq C_{total}
-\]
+$$
+
 
 批次规模优化：
-\[
+
+$$
 Q_i^* = \arg\max_{Q_i} \frac{E[\Pi_{net}(Q_i)]}{Q_i}
-\]
+$$
+
 
 批次时间间隔优化：
-\[
+
+$$
 \Delta t_i^* = \arg\max_{\Delta t_i} E[\Pi_{net}(Q_i, t_i + \Delta t_i)] - E[\Pi_{net}(Q_i, t_i)]
-\]
+$$
+
 
 ## 风险建模与对冲策略
 
 ### 转账风险量化
 
 转账失败风险：
-\[
-R_{fail} = p_{fail} \cdot (Q \cdot P_{source} + C_{init})
-\]
 
-其中\( p_{fail} \)是失败概率，\( C_{init} \)是已发生的成本。
+$$
+R_{fail} = p_{fail} \cdot (Q \cdot P_{source} + C_{init})
+$$
+
+
+其中$ p_{fail} $是失败概率，$ C_{init} $是已发生的成本。
 
 转账延迟风险：
-\[
+
+$$
 R_{delay} = p_{delay} \cdot (E[\Pi_{base}] - E[\Pi_{base} | \tau_{transfer} > \tau_{expected}])
-\]
+$$
+
 
 ### 价格波动风险
 
 转账期间的价格变动风险：
-\[
-R_{price} = Q \cdot \sigma_{target} \cdot \sqrt{\tau_{transfer}} \cdot z_{\alpha}
-\]
 
-其中\( z_{\alpha} \)是风险置信度的z分数（例如95%置信度下为1.96）。
+$$
+R_{price} = Q \cdot \sigma_{target} \cdot \sqrt{\tau_{transfer}} \cdot z_{\alpha}
+$$
+
+
+其中$ z_{\alpha} $是风险置信度的z分数（例如95%置信度下为1.96）。
 
 平台间正相关的对冲价值：
-\[
+
+$$
 H_{value} = Q \cdot \rho \cdot \sigma_{source} \cdot \sigma_{target} \cdot \tau_{transfer}
-\]
+$$
+
 
 ### 流动性风险
 
 流动性不足风险：
-\[
+
+$$
 R_{liquidity} = p_{insufficient} \cdot (E[\Pi_{base}] - E[\Pi_{base} | \text{reduced liquidity}])
-\]
+$$
+
 
 流动性深度模型：
-\[
-D_{DEX} = \frac{\sqrt{x \cdot y}}{2} = \frac{L}{2}
-\]
 
-对于恒定乘积AMM，其中\( L \)是流动性参数。
+$$
+D_{DEX} = \frac{\sqrt{x \cdot y}}{2} = \frac{L}{2}
+$$
+
+
+对于恒定乘积AMM，其中$ L $是流动性参数。
 
 ### 综合风险调整框架
 
 风险调整后的净利润：
-\[
-\Pi_{risk-adj} = E[\Pi_{net}] - \beta \cdot (R_{fail} + R_{delay} + R_{price} + R_{liquidity})
-\]
 
-其中\( \beta \)是风险厌恶参数。
+$$
+\Pi_{risk-adj} = E[\Pi_{net}] - \beta \cdot (R_{fail} + R_{delay} + R_{price} + R_{liquidity})
+$$
+
+
+其中$ \beta $是风险厌恶参数。
 
 风险限制约束：
-\[
+
+$$
 \frac{R_{total}}{C_{total}} \leq R_{max}
-\]
+$$
+
 
 ## 资本效率与循环优化
 
 ### 资本循环模型
 
 资本利用率：
-\[
-CUR = \frac{T_{active}}{T_{cycle}}
-\]
 
-其中\( T_{active} \)是资本主动参与交易的时间。
+$$
+CUR = \frac{T_{active}}{T_{cycle}}
+$$
+
+
+其中$ T_{active} $是资本主动参与交易的时间。
 
 年化收益率考虑资本循环：
-\[
+
+$$
 APY = \left(1 + \frac{\Pi_{net}}{Q}\right)^{\frac{365 \cdot 24 \cdot 60 \cdot 60}{T_{cycle}}} - 1
-\]
+$$
+
 
 ### 多阶段套利优化
 
 将套利周期视为多阶段随机过程：
-\[
-\Pi_{multi-stage} = \sum_{i=1}^{m} \Pi_i \cdot \prod_{j=1}^{i-1} p_j
-\]
 
-其中\( p_j \)是阶段\( j \)成功完成的概率。
+$$
+\Pi_{multi-stage} = \sum_{i=1}^{m} \Pi_i \cdot \prod_{j=1}^{i-1} p_j
+$$
+
+
+其中$ p_j $是阶段$ j $成功完成的概率。
 
 动态规划优化：
-\[
+
+$$
 V(s_t) = \max_{a_t} \{r(s_t, a_t) + \gamma \cdot E[V(s_{t+1}) | s_t, a_t]\}
-\]
+$$
+
 
 ### 并行路径执行
 
 并行执行多个套利路径时的总期望收益：
-\[
+
+$$
 E[\Pi_{parallel}] = \sum_{k=1}^{K} E[\Pi_k] - cov(\Pi_i, \Pi_j)
-\]
+$$
+
 
 资本分配优化：
-\[
+
+$$
 \{Q_1^*, Q_2^*, ..., Q_K^*\} = \arg\max_{Q_1, Q_2, ..., Q_K} E[\Pi_{parallel}]
-\]
+$$
+
 
 受限于：
-\[
+
+$$
 \sum_{k=1}^{K} Q_k \leq C_{total}
-\]
+$$
+
 
 ## 实施指南
 
@@ -367,32 +433,40 @@ E[\Pi_{parallel}] = \sum_{k=1}^{K} E[\Pi_k] - cov(\Pi_i, \Pi_j)
 
 关键交易所选择指标：
 1. **转账速度分数:**
-   \[
-   S_{speed} = \frac{1}{\mu_{transfer}} \cdot (1 - CV_{transfer})
-   \]
-   其中\( CV_{transfer} \)是转账时间的变异系数。
+   
+$$
+S_{speed} = \frac{1}{\mu_{transfer}} \cdot (1 - CV_{transfer})
+$$
+
+   其中$ CV_{transfer} $是转账时间的变异系数。
 
 2. **费用效率分数:**
-   \[
-   S_{fee} = \frac{1}{f_{W,C} + f_{D,C} + f_C + \bar{G}/\bar{Q}}
-   \]
+   
+$$
+S_{fee} = \frac{1}{f_{W,C} + f_{D,C} + f_C + \bar{G}/\bar{Q}}
+$$
+
 
 3. **可靠性分数:**
-   \[
-   S_{reliability} = (1 - p_{downtime}) \cdot (1 - p_{withdrawal\_rejection})
-   \]
+   
+$$
+S_{reliability} = (1 - p_{downtime}) \cdot (1 - p_{withdrawal\_rejection})
+$$
+
 
 4. **综合评分:**
-   \[
-   S_{overall} = w_1 \cdot S_{speed} + w_2 \cdot S_{fee} + w_3 \cdot S_{reliability}
-   \]
+   
+$$
+S_{overall} = w_1 \cdot S_{speed} + w_2 \cdot S_{fee} + w_3 \cdot S_{reliability}
+$$
+
 
 ### 监控与决策系统
 
 实时监控指标：
-1. 价格差异触发器：\( |\frac{P_C}{P_D} - 1| > \theta_{price} \)
-2. 转账状态追踪：\( status_{transfer} \in \{initiated, pending, completed, failed\} \)
-3. 资金利用率监控：\( \frac{\sum_{k=1}^{K} Q_k}{C_{total}} < \theta_{util} \)
+1. 价格差异触发器：$ |\frac{P_C}{P_D} - 1| > \theta_{price} $
+2. 转账状态追踪：$ status_{transfer} \in \{initiated, pending, completed, failed\} $
+3. 资金利用率监控：$ \frac{\sum_{k=1}^{K} Q_k}{C_{total}} < \theta_{util} $
 
 决策引擎：
 - 基于当前状态、历史数据和预测模型的多标准决策框架
@@ -401,48 +475,62 @@ E[\Pi_{parallel}] = \sum_{k=1}^{K} E[\Pi_k] - cov(\Pi_i, \Pi_j)
 ### 安全措施
 
 1. **资金暴露限制:**
-   \[
-   Q_{single} \leq \min(Q_{max}, \lambda \cdot C_{total})
-   \]
    
-   \[
-   \sum_{i \in active} Q_i \leq \gamma \cdot C_{total}
-   \]
+$$
+Q_{single} \leq \min(Q_{max}, \lambda \cdot C_{total})
+$$
+
+   
+   
+$$
+\sum_{i \in active} Q_i \leq \gamma \cdot C_{total}
+$$
+
 
 2. **交易验证框架:**
-   - 多重确认要求：\( confirmations \geq threshold_{network} \)
+   - 多重确认要求：$ confirmations \geq threshold_{network} $
    - 交易哈希验证
    - 接收地址白名单
 
 3. **应急机制:**
-   - 自动超时恢复：如果\( t_{current} - t_{initiated} > t_{timeout} \)，则触发恢复流程
-   - 风险降级策略：在特定风险事件后减少\( Q \)
+   - 自动超时恢复：如果$ t_{current} - t_{initiated} > t_{timeout} $，则触发恢复流程
+   - 风险降级策略：在特定风险事件后减少$ Q $
 
 ### 性能指标
 
 1. **成功率:**
-   \[
-   SR = \frac{\text{成功完成的套利周期数}}{\text{启动的套利周期总数}}
-   \]
+   
+$$
+SR = \frac{\text{成功完成的套利周期数}}{\text{启动的套利周期总数}}
+$$
+
 
 2. **资本调整收益率:**
-   \[
-   ROAC = \frac{\sum_{i=1}^{n} \Pi_i}{C_{total} \cdot max_t\{\sum_{k \in active(t)} \frac{Q_k}{C_{total}}\}}
-   \]
+   
+$$
+ROAC = \frac{\sum_{i=1}^{n} \Pi_i}{C_{total} \cdot max_t\{\sum_{k \in active(t)} \frac{Q_k}{C_{total}}\}}
+$$
+
 
 3. **风险调整表现:**
-   \[
-   Sharpe = \frac{r_{p} - r_f}{\sigma_p}
-   \]
    
-   \[
-   Sortino = \frac{r_{p} - r_f}{\sigma_{down}}
-   \]
+$$
+Sharpe = \frac{r_{p} - r_f}{\sigma_p}
+$$
+
+   
+   
+$$
+Sortino = \frac{r_{p} - r_f}{\sigma_{down}}
+$$
+
 
 4. **效率指标:**
-   \[
-   Efficiency = \frac{\sum_{i=1}^{n} \Pi_i}{\sum_{i=1}^{n} \Pi_{theoretical,i}}
-   \]
+   
+$$
+Efficiency = \frac{\sum_{i=1}^{n} \Pi_i}{\sum_{i=1}^{n} \Pi_{theoretical,i}}
+$$
+
 
 ## 与先前策略的比较
 

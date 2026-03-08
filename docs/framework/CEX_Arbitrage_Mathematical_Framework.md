@@ -30,69 +30,81 @@ This document presents a comprehensive mathematical analysis of two primary CEX 
 ## Pure Arbitrage Strategy Framework
 
 ### Mathematical Notation
-- **\( \boldsymbol{P_A} \) and \( \boldsymbol{P_B} \):** Asset prices on exchanges A and B respectively
-- **\( \boldsymbol{f_A} \) and \( \boldsymbol{f_B} \):** Trading fee rates on respective exchanges
-- **\( \boldsymbol{Q} \):** Trade volume
-- **\( \boldsymbol{s_A} \) and \( \boldsymbol{s_B} \):** Slippage factors
-- **\( \boldsymbol{\Delta t} \):** Execution delay time
-- **\( \boldsymbol{\sigma} \):** Price volatility
-- **\( \boldsymbol{\alpha} \):** Order execution probability
-- **\( \boldsymbol{\beta} \):** Risk adjustment coefficient
+- **$ \mathbf{P_A} $ and $ \mathbf{P_B} $:** Asset prices on exchanges A and B respectively
+- **$ \mathbf{f_A} $ and $ \mathbf{f_B} $:** Trading fee rates on respective exchanges
+- **$ \mathbf{Q} $:** Trade volume
+- **$ \mathbf{s_A} $ and $ \mathbf{s_B} $:** Slippage factors
+- **$ \mathbf{\Delta t} $:** Execution delay time
+- **$ \mathbf{\sigma} $:** Price volatility
+- **$ \mathbf{\alpha} $:** Order execution probability
+- **$ \mathbf{\beta} $:** Risk adjustment coefficient
 
 ### Basic Profit Model
-The fundamental arbitrage profit \( \Pi \) for a single trade cycle is:
+The fundamental arbitrage profit $ \Pi $ for a single trade cycle is:
 
-\[
+
+$$
 \Pi = Q \cdot \left[ P_B \cdot (1 - f_B - s_B) - P_A \cdot (1 + f_A + s_A) \right]
-\]
+$$
+
 
 ### Risk-Adjusted Framework
 Incorporating execution risk and market impact:
 
-\[
+
+$$
 \Pi_{\text{adj}} = Q \cdot \alpha \cdot \left[ P_B \cdot (1 - f_B - s_B) - P_A \cdot (1 + f_A + s_A) \right] - \beta \cdot \sigma \cdot \sqrt{\Delta t} \cdot Q
-\]
+$$
+
 
 The strategy executes when:
-\[
+
+$$
 \frac{P_B}{P_A} > \frac{1 + f_A + s_A}{1 - f_B - s_B} + \frac{\beta \cdot \sigma \cdot \sqrt{\Delta t}}{P_A \cdot (1 - f_B - s_B)}
-\]
+$$
+
 
 ## Cross-Exchange Market Making Framework
 
 ### Mathematical Foundation
 Key variables for the market making strategy:
-- **\( \boldsymbol{\delta} \):** Target spread percentage
-- **\( \boldsymbol{I_t} \):** Current inventory level at time t
-- **\( \boldsymbol{I_{\text{target}}} \):** Target inventory level
-- **\( \boldsymbol{\lambda} \):** Inventory adjustment rate
-- **\( \boldsymbol{\gamma} \):** Risk aversion parameter
+- **$ \mathbf{\delta} $:** Target spread percentage
+- **$ \mathbf{I_t} $:** Current inventory level at time t
+- **$ \mathbf{I_{\text{target}}} $:** Target inventory level
+- **$ \mathbf{\lambda} $:** Inventory adjustment rate
+- **$ \mathbf{\gamma} $:** Risk aversion parameter
 
 ### Inventory Management Model
-The optimal bid and ask prices (\( P^b \), \( P^a \)) are determined by:
+The optimal bid and ask prices ($ P^b $, $ P^a $) are determined by:
 
-\[
+
+$$
 \begin{aligned}
 P^b &= P_{\text{mid}} \cdot (1 - \delta/2 - \lambda \cdot (I_t - I_{\text{target}})) \\
 P^a &= P_{\text{mid}} \cdot (1 + \delta/2 - \lambda \cdot (I_t - I_{\text{target}}))
 \end{aligned}
-\]
+$$
 
-where \( P_{\text{mid}} \) is the mid-market price.
+
+where $ P_{\text{mid}} $ is the mid-market price.
 
 ### Profit Optimization
-Expected profit rate \( \mathbb{E}[\Pi] \) per unit time:
+Expected profit rate $ \mathbb{E}[\Pi] $ per unit time:
 
-\[
+
+$$
 \mathbb{E}[\Pi] = \lambda \cdot Q \cdot \delta \cdot P_{\text{mid}} - \gamma \cdot \sigma^2 \cdot I_t^2
-\]
+$$
+
 
 ### Risk Management
 Position risk is controlled through the inventory constraint:
 
-\[
+
+$$
 |I_t| \leq I_{\text{max}} = \frac{\lambda \cdot Q \cdot \delta}{2 \gamma \cdot \sigma^2}
-\]
+$$
+
 
 ## Strategy Comparison and Selection
 
@@ -106,38 +118,42 @@ Position risk is controlled through the inventory constraint:
 
 ### Optimization Criteria
 1. **Pure Arbitrage:**
-   - Minimize \( \Delta t \)
-   - Optimize \( Q \) based on order book depth
-   - Monitor \( \sigma \) for risk control
+   - Minimize $ \Delta t $
+   - Optimize $ Q $ based on order book depth
+   - Monitor $ \sigma $ for risk control
 
 2. **Market Making:**
-   - Optimize \( \delta \) based on volatility
-   - Adjust \( \lambda \) for inventory control
-   - Balance \( \gamma \) with profit targets
+   - Optimize $ \delta $ based on volatility
+   - Adjust $ \lambda $ for inventory control
+   - Balance $ \gamma $ with profit targets
 
 ## Practical Implementation Guidelines
 
 ### Parameter Calibration
 1. **Volatility Estimation:**
-   \[
-   \sigma = \sqrt{\frac{1}{n-1} \sum_{i=1}^n (r_i - \bar{r})^2}
-   \]
-   where \( r_i \) are historical returns.
+   
+$$
+\sigma = \sqrt{\frac{1}{n-1} \sum_{i=1}^n (r_i - \bar{r})^2}
+$$
+
+   where $ r_i $ are historical returns.
 
 2. **Optimal Trade Size:**
-   \[
-   Q_{\text{opt}} = \min\left(\frac{V_{\text{daily}}}{\sqrt{252}}, \frac{C}{\sigma \sqrt{\Delta t}}\right)
-   \]
-   where \( V_{\text{daily}} \) is daily volume and \( C \) is risk capital.
+   
+$$
+Q_{\text{opt}} = \min\left(\frac{V_{\text{daily}}}{\sqrt{252}}, \frac{C}{\sigma \sqrt{\Delta t}}\right)
+$$
+
+   where $ V_{\text{daily}} $ is daily volume and $ C $ is risk capital.
 
 ### Risk Controls
 1. **Position Limits:**
-   - Maximum position size: \( Q_{\text{max}} = k \cdot Q_{\text{opt}} \)
-   - Maximum inventory imbalance: \( I_{\text{max}} \)
+   - Maximum position size: $ Q_{\text{max}} = k \cdot Q_{\text{opt}} $
+   - Maximum inventory imbalance: $ I_{\text{max}} $
 
 2. **Stop-Loss Thresholds:**
-   - Per-trade loss limit: \( L_{\text{trade}} = -\alpha \cdot \mathbb{E}[\Pi] \)
-   - Daily loss limit: \( L_{\text{daily}} = -\beta \cdot \sqrt{252} \cdot \mathbb{E}[\Pi] \)
+   - Per-trade loss limit: $ L_{\text{trade}} = -\alpha \cdot \mathbb{E}[\Pi] $
+   - Daily loss limit: $ L_{\text{daily}} = -\beta \cdot \sqrt{252} \cdot \mathbb{E}[\Pi] $
 
 ## Conclusion
 This mathematical framework provides a rigorous foundation for implementing and optimizing CEX arbitrage strategies. The choice between pure arbitrage and cross-exchange market making depends on market conditions, technological capabilities, and risk preferences. Successful implementation requires careful parameter calibration, robust risk management, and continuous monitoring of market conditions.

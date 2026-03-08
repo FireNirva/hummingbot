@@ -1,5 +1,6 @@
 import unittest.mock
 from decimal import Decimal
+from types import SimpleNamespace
 from test.hummingbot.strategy import assign_config_default
 from test.isolated_asyncio_wrapper_test_case import IsolatedAsyncioWrapperTestCase
 
@@ -47,3 +48,20 @@ class AMMArbStartTest(IsolatedAsyncioWrapperTestCase):
         await amm_arb_start.start(self)
         self.assertEqual(self.strategy._order_amount, Decimal(1))
         self.assertEqual(self.strategy._min_profitability, Decimal("10") / Decimal("100"))
+
+    @unittest.mock.patch("hummingbot.strategy.amm_arb.start.AllConnectorSettings.get_gateway_amm_connector_names")
+    @unittest.mock.patch("hummingbot.strategy.amm_arb.amm_arb.AmmArbStrategy.add_markets")
+    async def test_wallet_address_binds_only_gateway_connector(self, add_markets_mock, gateway_connectors_mock):
+        gateway_connectors_mock.return_value = {"balancer"}
+        wallet_address = "0x164BeADF2adD3A0a0cD091eB210AD255b897970b"
+        amm_arb_config_map.get("wallet_address").value = wallet_address
+
+        self.markets = {
+            "binance": SimpleNamespace(name="binance", _wallet_address=None),
+            "balancer": SimpleNamespace(name="balancer", _wallet_address=None),
+        }
+
+        await amm_arb_start.start(self)
+
+        self.assertIsNone(self.markets["binance"]._wallet_address)
+        self.assertEqual(wallet_address, self.markets["balancer"]._wallet_address)

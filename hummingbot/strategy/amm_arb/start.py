@@ -22,6 +22,7 @@ async def start(self):
     quote_conversion_rate = amm_arb_config_map.get("quote_conversion_rate").value
     gas_token = amm_arb_config_map.get("gas_token").value
     gas_price = amm_arb_config_map.get("gas_price").value
+    wallet_address = amm_arb_config_map.get("wallet_address").value
 
     await self.initialize_markets([(connector_1, [market_1]), (connector_2, [market_2])])
     base_1, quote_1 = market_1.split("-")
@@ -30,6 +31,13 @@ async def start(self):
     is_connector_1_gateway = connector_1 in sorted(AllConnectorSettings.get_gateway_amm_connector_names())
 
     is_connector_2_gateway = connector_2 in sorted(AllConnectorSettings.get_gateway_amm_connector_names())
+
+    # Bind explicit wallet address to gateway connector (avoids nonce conflicts in multi-bot setups)
+    if wallet_address:
+        if is_connector_1_gateway:
+            self.markets[connector_1]._wallet_address = wallet_address
+        if is_connector_2_gateway:
+            self.markets[connector_2]._wallet_address = wallet_address
 
     market_info_1 = MarketTradingPairTuple(
         self.markets[connector_1], market_1 if not is_connector_1_gateway else market_1, base_1, quote_1

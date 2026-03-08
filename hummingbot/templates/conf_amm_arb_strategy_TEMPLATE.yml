@@ -2,7 +2,7 @@
 ###   AMM Arbitrage strategy config   ###
 ##########################################
 
-template_version: 6
+template_version: 7
 strategy: null
 
 # The following configurations are only required for the AMM arbitrage trading strategy
@@ -32,6 +32,11 @@ market_2_slippage_buffer: null
 # A flag (true/false), if true the bot submits both arbitrage taker orders (buy and sell) simultaneously
 # If false, the bot will wait for first exchange order filled before submitting the other order
 concurrent_orders_submission: null
+
+# Optional wallet address for Gateway connectors.
+# When set, Hummingbot binds the strategy to this wallet instead of Gateway's default wallet.
+# Recommended for Base/EVM multi-bot setups to avoid nonce conflicts.
+wallet_address: null
 
 # What rate source should be used for quote assets pair - between fixed_rate_source and rate_oracle_source?
 # When true: Uses an oracle (like CoinGecko) to get real-time conversion rates between quote assets

@@ -148,4 +148,11 @@ amm_arb_config_map = {
         validator=lambda v: validate_decimal(v),
         prompt_on_new=False,
         type_str="decimal"),
+    "wallet_address": ConfigVar(
+        key="wallet_address",
+        prompt="Enter the wallet address to use for the Gateway connector (leave blank for default) >>> ",
+        default=None,
+        prompt_on_new=False,
+        required_if=lambda: False,
+        type_str="str"),
 }

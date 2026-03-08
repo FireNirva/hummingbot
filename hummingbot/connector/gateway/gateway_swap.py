@@ -128,11 +128,20 @@ class GatewaySwap(GatewayBase):
         amount = self.quantize_order_amount(trading_pair, amount)
         price = self.quantize_order_price(trading_pair, price)
 
+        # DEX AMM: quantize 可能将小价格舍入为 0，导致 TradeFill price=0、history 收益虚高
+        if price is None or price <= Decimal("0"):
+            try:
+                quote_price = await self.get_quote_price(trading_pair, trade_type == TradeType.BUY, amount)
+                if quote_price is not None and quote_price > Decimal("0"):
+                    price = self.quantize_order_price(trading_pair, quote_price) or quote_price
+            except Exception as e:
+                self.logger().warning(f"Could not fetch quote price for TradeFill: {e}")
+
         base, quote = trading_pair.split("-")
         self.start_tracking_order(order_id=order_id,
                                   trading_pair=trading_pair,
                                   trade_type=trade_type,
-                                  price=price,
+                                  price=price if price and price > Decimal("0") else Decimal("0"),
                                   amount=amount)
         try:
             # Check if we have a quote_id to execute

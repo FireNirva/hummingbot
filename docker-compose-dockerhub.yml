@@ -2,7 +2,7 @@ services:
   hummingbot:
     container_name: hummingbot
     # 使用你的 Docker Hub 镜像（包含 AMM_SWAP 和其他修改）
-    image: firenirva/hummingbot:5ffe427e4  # ⚠️ 替换为你的实际用户名
+    image: firenirva/hummingbot:latest  # ⚠️ 替换为你的实际用户名
     volumes:
       - ./conf:/home/hummingbot/conf
       - ./conf/connectors:/home/hummingbot/conf/connectors
@@ -30,7 +30,7 @@ services:
     restart: always
     container_name: gateway
     # 使用你的 Docker Hub 镜像（包含 gas fee 优化）
-    image: firenirva/gateway:v2.13.0-custom  # ⚠️ 替换为你的实际用户名
+    image: firenirva/gateway:latest  # ⚠️ 替换为你的实际用户名
     ports:
       - "15888:15888"
     volumes:

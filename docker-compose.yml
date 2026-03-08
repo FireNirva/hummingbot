@@ -1,7 +1,7 @@
 services:
   hummingbot:
     container_name: hummingbot
-    image: firenirva/hummingbot:5ffe427e4
+    image: firenirva/hummingbot:latest
     # build: # Uncomment this build section and comment image to build Hummingbot locally
     #   context: .
     #   dockerfile: Dockerfile
@@ -33,7 +33,7 @@ services:
     profiles: ["gateway"]
     restart: always
     container_name: gateway
-    image: firenirva/gateway:v2.13.0-custom
+    image: firenirva/gateway:latest
     # build:
     #   context: ./gateway
     #   dockerfile: Dockerfile

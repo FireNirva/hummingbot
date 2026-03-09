@@ -17,7 +17,7 @@ class KucoinRateSource(RateSourceBase):
     def name(self) -> str:
         return "kucoin"
 
-    @async_ttl_cache(ttl=30, maxsize=1)
+    @async_ttl_cache(ttl=1, maxsize=1)
     async def get_prices(self, quote_token: Optional[str] = None) -> Dict[str, Decimal]:
         self._ensure_exchange()
         results = {}

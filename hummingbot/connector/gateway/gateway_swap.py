@@ -14,7 +14,7 @@ class GatewaySwap(GatewayBase):
     Maintains order tracking and wallet interactions in the base class.
     """
 
-    @async_ttl_cache(ttl=5, maxsize=10)
+    @async_ttl_cache(ttl=2, maxsize=10)
     async def get_quote_price(
             self,
             trading_pair: str,

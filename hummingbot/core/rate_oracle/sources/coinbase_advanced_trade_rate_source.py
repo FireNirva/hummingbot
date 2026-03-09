@@ -24,7 +24,7 @@ class CoinbaseAdvancedTradeRateSource(RateSourceBase):
     def name(self) -> str:
         return "coinbase_advanced_trade"
 
-    @async_ttl_cache(ttl=30, maxsize=1)
+    @async_ttl_cache(ttl=1, maxsize=1)
     async def get_prices(self, quote_token: str | None = None) -> Dict[str, Decimal]:
         if quote_token is None:
             quote_token = "USD"

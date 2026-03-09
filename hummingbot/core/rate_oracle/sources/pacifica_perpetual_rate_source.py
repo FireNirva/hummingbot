@@ -20,7 +20,7 @@ class PacificaPerpetualRateSource(RateSourceBase):
     def name(self) -> str:
         return "pacifica_perpetual"
 
-    @async_ttl_cache(ttl=30, maxsize=1)
+    @async_ttl_cache(ttl=1, maxsize=1)
     async def get_prices(self, quote_token: Optional[str] = None) -> Dict[str, Decimal]:
         if quote_token is not None and quote_token != "USDC":
             raise ValueError("Pacifica Perpetual only supports USDC as quote token.")

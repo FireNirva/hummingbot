@@ -310,10 +310,9 @@ class GatewayHttpClient:
                     centralised=False,
                     example_pair="ETH-USDC",
                     use_ethereum_wallet=False,  # Gateway handles wallet internally
-                    trade_fee_schema=TradeFeeSchema(
-                        maker_percent_fee_decimal=Decimal("0.003"),
-                        taker_percent_fee_decimal=Decimal("0.003"),
-                    ),
+                    # Gateway swap quotes already reflect execution pricing, so percent fees
+                    # should not be added again on the client side.
+                    trade_fee_schema=TradeFeeSchema(),
                     config_keys=None,
                     is_sub_domain=False,
                     parent_name=None,

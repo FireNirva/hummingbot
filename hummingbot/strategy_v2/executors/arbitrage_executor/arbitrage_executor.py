@@ -64,10 +64,16 @@ class ArbitrageExecutor(ExecutorBase):
         self.min_profitability = config.min_profitability
         self.order_amount = config.order_amount
         self.max_retries = max_retries
+        self.concurrent_orders_submission = config.concurrent_orders_submission
+        self.prioritize_non_amm_first = config.prioritize_non_amm_first
+        self.retry_failed_orders = config.retry_failed_orders
 
         # Order tracking
         self._buy_order: TrackedOrder = TrackedOrder()
         self._sell_order: TrackedOrder = TrackedOrder()
+        self._first_order_side, self._second_order_side = self._resolve_order_submission_sequence()
+        self._first_order_submitted = False
+        self._second_order_submitted = False
 
         self._last_buy_price = Decimal("1")
         self._last_sell_price = Decimal("1")
@@ -190,8 +196,30 @@ class ArbitrageExecutor(ExecutorBase):
 
     async def execute_arbitrage(self):
         self._status = RunnableStatus.SHUTTING_DOWN
-        self.place_buy_arbitrage_order()
-        self.place_sell_arbitrage_order()
+        if self.concurrent_orders_submission:
+            self.place_buy_arbitrage_order()
+            self.place_sell_arbitrage_order()
+            self._first_order_submitted = True
+            self._second_order_submitted = True
+        else:
+            self._place_order_for_side(self._first_order_side)
+            self._first_order_submitted = True
+
+    def _resolve_order_submission_sequence(self):
+        buy_is_amm = self.buying_market.is_amm_connector()
+        sell_is_amm = self.selling_market.is_amm_connector()
+        if self.prioritize_non_amm_first:
+            if buy_is_amm and not sell_is_amm:
+                return "sell", "buy"
+            if sell_is_amm and not buy_is_amm:
+                return "buy", "sell"
+        return "buy", "sell"
+
+    def _place_order_for_side(self, side: str):
+        if side == "buy":
+            self.place_buy_arbitrage_order()
+        else:
+            self.place_sell_arbitrage_order()
 
     def place_buy_arbitrage_order(self):
         self.buy_order.order_id = self.place_order(
@@ -310,13 +338,39 @@ class ArbitrageExecutor(ExecutorBase):
             self.logger().info("Sell Order Created")
             self.sell_order.order = self.get_in_flight_order(self.selling_market.connector_name, event.order_id)
 
+    def process_order_completed_event(self, _, market, event):
+        super().process_order_completed_event(_, market, event)
+        if self.concurrent_orders_submission or self._second_order_submitted:
+            return
+        if self._first_order_side == "buy" and self.buy_order.order_id == event.order_id:
+            self._place_order_for_side(self._second_order_side)
+            self._second_order_submitted = True
+        elif self._first_order_side == "sell" and self.sell_order.order_id == event.order_id:
+            self._place_order_for_side(self._second_order_side)
+            self._second_order_submitted = True
+
     def process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
+        failed_side = None
         if self.buy_order.order_id == event.order_id:
-            self.place_buy_arbitrage_order()
-            self._cumulative_failures += 1
+            failed_side = "buy"
         elif self.sell_order.order_id == event.order_id:
-            self.place_sell_arbitrage_order()
-            self._cumulative_failures += 1
+            failed_side = "sell"
+
+        if failed_side is None:
+            return
+
+        self._cumulative_failures += 1
+
+        if self.retry_failed_orders and self._cumulative_failures <= self.max_retries:
+            self._place_order_for_side(failed_side)
+            if failed_side == self._first_order_side:
+                self._first_order_submitted = True
+            else:
+                self._second_order_submitted = True
+            return
+
+        self.close_type = CloseType.FAILED
+        self.stop()
 
     def get_custom_info(self) -> Dict:
         return {
@@ -336,6 +390,9 @@ class ArbitrageExecutor(ExecutorBase):
             "tx_cost_pct": self._last_tx_cost / self.order_amount,
             "profit_pct": self._current_profitability,
             "failures": self._cumulative_failures,
+            "concurrent_orders_submission": self.concurrent_orders_submission,
+            "prioritize_non_amm_first": self.prioritize_non_amm_first,
+            "retry_failed_orders": self.retry_failed_orders,
         }
 
     def to_format_status(self):

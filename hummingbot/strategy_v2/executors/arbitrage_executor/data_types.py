@@ -11,3 +11,6 @@ class ArbitrageExecutorConfig(ExecutorConfigBase):
     order_amount: Decimal
     min_profitability: Decimal
     gas_conversion_price: Optional[Decimal] = None
+    concurrent_orders_submission: bool = True
+    prioritize_non_amm_first: bool = False
+    retry_failed_orders: bool = True

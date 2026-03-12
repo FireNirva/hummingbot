@@ -1,3 +1,4 @@
+import time
 from decimal import Decimal
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple, Union
@@ -112,9 +113,15 @@ class ExecutorBase(RunnableBase):
             d = Decimal(str(value))
             return d if d.is_finite() else Decimal("0")
 
+        executor_timestamp = self.config.timestamp
+        if executor_timestamp is None:
+            executor_timestamp = self._strategy.current_timestamp
+        if executor_timestamp is None:
+            executor_timestamp = time.time()
+
         ei = ExecutorInfo(
             id=self.config.id,
-            timestamp=self.config.timestamp,
+            timestamp=executor_timestamp,
             type=self.config.type,
             status=self.status,
             close_type=self.close_type,

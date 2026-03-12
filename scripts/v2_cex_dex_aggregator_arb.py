@@ -28,6 +28,7 @@ from hummingbot.core.event.events import (
     SellOrderCompletedEvent,
     SellOrderCreatedEvent,
 )
+from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.core.utils.fixed_rate_source import FixedRateSource
 from hummingbot.strategy.strategy_v2_base import StrategyV2Base, StrategyV2ConfigBase
 from hummingbot.strategy_v2.executors.arbitrage_executor.data_types import ArbitrageExecutorConfig
@@ -132,7 +133,11 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
     gas_token_price_quote: Decimal = Field(
         default=Decimal("2000"),
         gt=0,
-        description="Gas token price denominated in the CEX quote asset",
+        description="Deprecated alias for gas_price. Gas token price denominated in the CEX quote asset.",
+    )
+    rate_oracle_enabled: bool = Field(
+        default=True,
+        description="Use the global Hummingbot rate oracle for quote and gas conversions.",
     )
     quote_conversion_rate: Decimal = Field(
         default=Decimal("1"),
@@ -140,8 +145,25 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         description="DEX quote asset to CEX quote asset conversion rate",
     )
     gas_token: str = Field(default="ETH", description="Native gas token symbol")
+    gas_price: Optional[Decimal] = Field(
+        default=None,
+        gt=0,
+        description="Fixed gas token price in the CEX quote asset. Used when rate_oracle_enabled is false.",
+    )
 
     max_concurrent_executors: int = Field(default=1, ge=1)
+    executor_concurrent_orders_submission: bool = Field(
+        default=False,
+        description="Submit both arbitrage legs concurrently. Disable to submit sequentially.",
+    )
+    executor_prioritize_non_amm_first: bool = Field(
+        default=True,
+        description="When sequential, place the non-gateway / non-AMM leg first.",
+    )
+    executor_retry_failed_orders: bool = Field(
+        default=False,
+        description="Retry failed arbitrage leg orders from the executor.",
+    )
     no_opportunity_log_interval: int = Field(default=30, ge=0)
 
     aggregator_quote_cooldown_sec: Decimal = Field(
@@ -241,6 +263,11 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         ge=1,
         description="Trip after this many consecutive quote refresh failures of any kind.",
     )
+    circuit_breaker_order_failure_threshold: int = Field(
+        default=3,
+        ge=1,
+        description="Trip after this many consecutive DEX order failures.",
+    )
 
     @field_validator(
         "order_amount",
@@ -248,6 +275,7 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         "cex_fee_rate",
         "dex_fee_rate",
         "gas_token_price_quote",
+        "gas_price",
         "quote_conversion_rate",
         "aggregator_quote_cooldown_sec",
         "aggregator_quote_ttl_sec",
@@ -259,7 +287,9 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         "dex_event_quote_amount_move_trigger_pct",
     )
     @classmethod
-    def quantize_decimal_fields(cls, value: Decimal) -> Decimal:
+    def quantize_decimal_fields(cls, value: Optional[Decimal]) -> Optional[Decimal]:
+        if value is None:
+            return None
         return Decimal(str(value))
 
     @staticmethod
@@ -314,8 +344,10 @@ class AggregatorCexDexArb(StrategyV2Base):
 
         self._cex_fee_rate = Decimal(str(config.cex_fee_rate))
         self._dex_fee_rate = Decimal(str(config.dex_fee_rate))
+        self._rate_oracle_enabled = bool(config.rate_oracle_enabled)
         self._quote_conversion_rate = Decimal(str(config.quote_conversion_rate))
-        self._gas_token_price_quote = Decimal(str(config.gas_token_price_quote))
+        resolved_gas_price = config.gas_price if config.gas_price is not None else config.gas_token_price_quote
+        self._gas_token_price_quote = Decimal(str(resolved_gas_price))
         self._gas_conversion_ratio = Decimal("1") / self._gas_token_price_quote
 
         self._quote_cache: Dict[str, DexQuoteSnapshot] = {}
@@ -354,6 +386,7 @@ class AggregatorCexDexArb(StrategyV2Base):
         self._consecutive_quote_failures = 0
         self._consecutive_empty_quotes = 0
         self._consecutive_network_errors = 0
+        self._consecutive_order_failures = 0
         self._circuit_breaker_active = False
         self._circuit_breaker_reason: Optional[str] = None
         self._circuit_breaker_context: Optional[Dict[str, Any]] = None
@@ -364,7 +397,7 @@ class AggregatorCexDexArb(StrategyV2Base):
         self._event_pairs: List[Tuple[MarketEvent, SourceInfoEventForwarder]] = []
         self._listeners_registered = False
 
-        self._rate_source = FixedRateSource()
+        self._rate_source = RateOracle.get_instance() if self._rate_oracle_enabled else FixedRateSource()
         self._setup_rate_source()
         self._initialize_phase0_observability()
 
@@ -415,11 +448,12 @@ class AggregatorCexDexArb(StrategyV2Base):
         return []
 
     def _has_active_executor(self) -> bool:
-        active = self.filter_executors(
-            executors=self.get_all_executors(),
-            filter_func=lambda e: e.is_active,
-        )
-        return len(active) >= self.config.max_concurrent_executors
+        live_executor_count = 0
+        for executor in self.get_all_executors():
+            status = executor.status.name if isinstance(executor.status, Enum) else str(executor.status)
+            if status != RunnableStatus.TERMINATED.name:
+                live_executor_count += 1
+        return live_executor_count >= self.config.max_concurrent_executors
 
     def _execute_local_executor_actions(self):
         actions = self.determine_executor_actions()
@@ -500,6 +534,28 @@ class AggregatorCexDexArb(StrategyV2Base):
 
             snapshot = self._quote_cache.get(best_direction)
             opportunity_id = f"opp-{uuid.uuid4().hex[:12]}"
+            budget_ok, budget_context = self._passes_budget_constraint(
+                direction=best_direction,
+                amount=amount,
+                cex_ask=cex_ask,
+                cex_bid=cex_bid,
+                dex_snapshot=snapshot,
+            )
+            if not budget_ok:
+                self._metrics["opportunities_skipped"] += 1
+                self.logger().info(budget_context["message"])
+                self._emit_event(
+                    "opportunity_skipped",
+                    reason="insufficient_balance",
+                    amount=amount,
+                    best_direction=best_direction,
+                    best_profit_pct=best_profit,
+                    threshold_pct=self.config.min_profitability,
+                    cex_ask=cex_ask,
+                    cex_bid=cex_bid,
+                    balance_context=budget_context,
+                )
+                return
             self._metrics["opportunities_detected"] += 1
             self._emit_event(
                 "opportunity_detected",
@@ -566,6 +622,8 @@ class AggregatorCexDexArb(StrategyV2Base):
         return ask, bid
 
     def _setup_rate_source(self):
+        if self._rate_oracle_enabled:
+            return
         self._add_rate_pair(self._dex_quote, self._cex_quote, self._quote_conversion_rate)
         gas_token = getattr(self.config, "gas_token", "ETH")
         gas_to_quote = self._gas_token_price_quote
@@ -749,6 +807,14 @@ class AggregatorCexDexArb(StrategyV2Base):
 
         if dex_buy is not None:
             dex_buy_price_cex_quote = self._convert_price_to_cex_quote(dex_buy.price)
+            if dex_buy_price_cex_quote is None or dex_buy_price_cex_quote <= Decimal("0"):
+                dex_buy_price_cex_quote = None
+            else:
+                dex_buy_price_cex_quote = Decimal(str(dex_buy_price_cex_quote))
+        else:
+            dex_buy_price_cex_quote = None
+
+        if dex_buy is not None and dex_buy_price_cex_quote is not None:
             total_cost = amount * dex_buy_price_cex_quote
             total_cost += total_cost * self._dex_fee_rate
             total_cost += dex_flat_fee_quote
@@ -760,6 +826,14 @@ class AggregatorCexDexArb(StrategyV2Base):
 
         if dex_sell is not None:
             dex_sell_price_cex_quote = self._convert_price_to_cex_quote(dex_sell.price)
+            if dex_sell_price_cex_quote is None or dex_sell_price_cex_quote <= Decimal("0"):
+                dex_sell_price_cex_quote = None
+            else:
+                dex_sell_price_cex_quote = Decimal(str(dex_sell_price_cex_quote))
+        else:
+            dex_sell_price_cex_quote = None
+
+        if dex_sell is not None and dex_sell_price_cex_quote is not None:
             total_cost = amount * cex_ask
             total_cost += total_cost * self._cex_fee_rate
 
@@ -1185,18 +1259,149 @@ class AggregatorCexDexArb(StrategyV2Base):
         except Exception as exc:
             self.logger().error(f"Failed to stop strategy after circuit breaker trip: {exc}", exc_info=True)
 
-    def _convert_price_to_cex_quote(self, dex_price: Decimal) -> Decimal:
-        return dex_price * self._quote_conversion_rate
+    def _convert_price_to_cex_quote(self, dex_price: Decimal) -> Optional[Decimal]:
+        conversion_rate = self._get_quote_conversion_rate()
+        if conversion_rate is None:
+            return None
+        return dex_price * conversion_rate
 
     def _convert_flat_fee_to_cex_quote(self) -> Decimal:
         connector = self.connectors[self.config.dex_connector]
         gas_fee = getattr(connector, "network_transaction_fee", None)
         if gas_fee is None or getattr(gas_fee, "amount", None) is None:
             return Decimal("0")
-        rate = self._rate_source.get_pair_rate(f"{gas_fee.token}-{self._cex_quote}")
+        rate = self._get_pair_rate(gas_fee.token, self._cex_quote, fallback=self._gas_token_price_quote)
         if rate is None:
             return Decimal("0")
         return Decimal(str(gas_fee.amount)) * rate
+
+    def _passes_budget_constraint(
+        self,
+        direction: str,
+        amount: Decimal,
+        cex_ask: Decimal,
+        cex_bid: Decimal,
+        dex_snapshot: Optional[DexQuoteSnapshot],
+    ) -> Tuple[bool, Dict[str, Any]]:
+        if dex_snapshot is None:
+            return False, {
+                "message": "Can't arbitrage, no valid DEX quote snapshot is available.",
+                "direction": direction,
+            }
+
+        if direction == self.BUY_DEX_SELL_CEX:
+            dex_buy_price = Decimal(str(dex_snapshot.price))
+            dex_required_quote = amount * dex_buy_price
+            dex_required_quote += dex_required_quote * self._dex_fee_rate
+            dex_quote_balance = self._get_available_balance(self.config.dex_connector, self._dex_quote)
+            if dex_quote_balance < dex_required_quote:
+                return False, self._insufficient_balance_context(
+                    connector_name=self.config.dex_connector,
+                    token=self._dex_quote,
+                    balance=dex_quote_balance,
+                    required=dex_required_quote,
+                    direction=direction,
+                )
+
+            cex_base_balance = self._get_available_balance(self.config.cex_connector, self._cex_base)
+            if cex_base_balance < amount:
+                return False, self._insufficient_balance_context(
+                    connector_name=self.config.cex_connector,
+                    token=self._cex_base,
+                    balance=cex_base_balance,
+                    required=amount,
+                    direction=direction,
+                )
+        else:
+            cex_required_quote = amount * cex_ask
+            cex_required_quote += cex_required_quote * self._cex_fee_rate
+            cex_quote_balance = self._get_available_balance(self.config.cex_connector, self._cex_quote)
+            if cex_quote_balance < cex_required_quote:
+                return False, self._insufficient_balance_context(
+                    connector_name=self.config.cex_connector,
+                    token=self._cex_quote,
+                    balance=cex_quote_balance,
+                    required=cex_required_quote,
+                    direction=direction,
+                )
+
+            dex_base_balance = self._get_available_balance(self.config.dex_connector, self._cex_base)
+            if dex_base_balance < amount:
+                return False, self._insufficient_balance_context(
+                    connector_name=self.config.dex_connector,
+                    token=self._cex_base,
+                    balance=dex_base_balance,
+                    required=amount,
+                    direction=direction,
+                )
+
+        gas_fee = self._get_network_transaction_fee()
+        if gas_fee is not None and gas_fee["amount"] > Decimal("0"):
+            gas_balance = self._get_available_balance(self.config.dex_connector, gas_fee["token"])
+            if gas_balance < gas_fee["amount"]:
+                return False, self._insufficient_balance_context(
+                    connector_name=self.config.dex_connector,
+                    token=gas_fee["token"],
+                    balance=gas_balance,
+                    required=gas_fee["amount"],
+                    direction=direction,
+                    message_prefix="Can't arbitrage, insufficient DEX gas balance.",
+                )
+
+        return True, {}
+
+    def _get_available_balance(self, connector_name: str, token: str) -> Decimal:
+        connector = self.connectors[connector_name]
+        return Decimal(str(connector.get_available_balance(token)))
+
+    def _get_network_transaction_fee(self) -> Optional[Dict[str, Decimal]]:
+        connector = self.connectors[self.config.dex_connector]
+        gas_fee = getattr(connector, "network_transaction_fee", None)
+        if gas_fee is None or getattr(gas_fee, "amount", None) is None:
+            return None
+        return {
+            "token": str(gas_fee.token),
+            "amount": Decimal(str(gas_fee.amount)),
+        }
+
+    def _insufficient_balance_context(
+        self,
+        connector_name: str,
+        token: str,
+        balance: Decimal,
+        required: Decimal,
+        direction: str,
+        message_prefix: str = "Can't arbitrage, insufficient balance.",
+    ) -> Dict[str, Any]:
+        message = (
+            f"{message_prefix} {connector_name} {token} balance "
+            f"({self._format_decimal(balance)}) is below required amount ({self._format_decimal(required)})."
+        )
+        return {
+            "message": message,
+            "connector": connector_name,
+            "token": token,
+            "balance": balance,
+            "required": required,
+            "direction": direction,
+        }
+
+    def _get_pair_rate(self, base: str, quote: str, fallback: Optional[Decimal] = None) -> Optional[Decimal]:
+        if base == quote:
+            return Decimal("1")
+        rate = self._rate_source.get_pair_rate(f"{base}-{quote}")
+        if rate is None and fallback is not None and not self._rate_oracle_enabled:
+            rate = fallback
+        return Decimal(str(rate)) if rate is not None else None
+
+    def _get_quote_conversion_rate(self) -> Optional[Decimal]:
+        return self._get_pair_rate(self._dex_quote, self._cex_quote, fallback=self._quote_conversion_rate)
+
+    def _get_gas_conversion_ratio(self) -> Decimal:
+        gas_rate = self._get_pair_rate(self.config.gas_token, self._cex_quote, fallback=self._gas_token_price_quote)
+        if gas_rate is None or gas_rate <= Decimal("0"):
+            return self._gas_conversion_ratio
+        return Decimal("1") / gas_rate
 
     def _select_best_direction(self, profit_map: Dict[str, Decimal]) -> Tuple[Optional[str], Optional[Decimal]]:
         if not profit_map:
@@ -1271,11 +1476,15 @@ class AggregatorCexDexArb(StrategyV2Base):
             )
 
         return ArbitrageExecutorConfig(
+            timestamp=self._now(),
             buying_market=buying_market,
             selling_market=selling_market,
             order_amount=amount,
             min_profitability=self.config.min_profitability,
-            gas_conversion_price=self._gas_conversion_ratio,
+            gas_conversion_price=self._get_gas_conversion_ratio(),
+            concurrent_orders_submission=self.config.executor_concurrent_orders_submission,
+            prioritize_non_amm_first=self.config.executor_prioritize_non_amm_first,
+            retry_failed_orders=self.config.executor_retry_failed_orders,
         )
 
     def _initialize_phase0_observability(self):
@@ -1291,6 +1500,9 @@ class AggregatorCexDexArb(StrategyV2Base):
             dex_event_watch_markets=self.config.dex_event_watch_markets,
             order_amount=self.config.order_amount,
             min_profitability_pct=self.config.min_profitability,
+            rate_oracle_enabled=self.config.rate_oracle_enabled,
+            quote_conversion_rate=self.config.quote_conversion_rate,
+            gas_price=self.config.gas_price if self.config.gas_price is not None else self.config.gas_token_price_quote,
             event_log_path=str(self._event_log_path) if self._event_log_path else None,
         )
 
@@ -1437,6 +1649,7 @@ class AggregatorCexDexArb(StrategyV2Base):
 
     def _process_order_completed_event(self, _, market, event: Any):
         connector_name = self._connector_name_from_market(market)
+        self._consecutive_order_failures = 0
         side = "BUY" if isinstance(event, BuyOrderCompletedEvent) else "SELL"
         self._metrics["orders_completed"] += 1
         self._emit_event(
@@ -1454,17 +1667,71 @@ class AggregatorCexDexArb(StrategyV2Base):
 
     def _process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
         connector_name = self._connector_name_from_market(market)
+        error_message = event.error_message or ""
+        self._consecutive_order_failures += 1
         self._metrics["orders_failed"] += 1
-        if self._is_vendor_throttle_error(event.error_message or ""):
+        if self._is_vendor_throttle_error(error_message):
             self._metrics["vendor_429_count"] += 1
         self._emit_event(
             "order_failed",
             connector=connector_name,
             order_id=event.order_id,
             order_type=event.order_type,
-            error_message=event.error_message,
+            error_message=error_message,
             error_type=event.error_type,
         )
+        if (
+            self.config.circuit_breaker_enabled
+            and self.config.circuit_breaker_trip_on_vendor_429
+            and self._is_vendor_throttle_error(error_message)
+        ):
+            self._trip_circuit_breaker(
+                reason="order_vendor_429",
+                context={
+                    "connector": connector_name,
+                    "order_id": event.order_id,
+                    "order_type": str(event.order_type),
+                    "error_message": error_message,
+                },
+            )
+            return
+        if self.config.circuit_breaker_enabled and self._is_fatal_order_error(error_message):
+            self._trip_circuit_breaker(
+                reason="fatal_order_error",
+                context={
+                    "connector": connector_name,
+                    "order_id": event.order_id,
+                    "order_type": str(event.order_type),
+                    "error_message": error_message,
+                },
+            )
+            return
+        if (
+            self.config.circuit_breaker_enabled
+            and connector_name == self.config.dex_connector
+            and self._consecutive_order_failures >= self.config.circuit_breaker_order_failure_threshold
+        ):
+            self._trip_circuit_breaker(
+                reason="consecutive_dex_order_failures",
+                context={
+                    "connector": connector_name,
+                    "order_id": event.order_id,
+                    "order_type": str(event.order_type),
+                    "error_message": error_message,
+                    "consecutive_order_failures": self._consecutive_order_failures,
+                },
+            )
+            return
+        if self._is_network_error(error_message):
+            self._record_network_error(
+                source="order_failure",
+                error=Exception(error_message),
+                context={
+                    "connector": connector_name,
+                    "order_id": event.order_id,
+                    "order_type": str(event.order_type),
+                },
+            )
 
     def _process_order_cancelled_event(self, _, market, event: OrderCancelledEvent):
         connector_name = self._connector_name_from_market(market)
@@ -1581,6 +1848,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             "consecutive_quote_failures": self._consecutive_quote_failures,
             "consecutive_empty_quotes": self._consecutive_empty_quotes,
             "consecutive_network_errors": self._consecutive_network_errors,
+            "consecutive_order_failures": self._consecutive_order_failures,
             "avg_quote_latency_ms": avg_quote_latency_ms,
             "quote_to_trade_ratio": (Decimal(str(quote_requests)) / Decimal(str(trades_closed))) if trades_closed > 0 else None,
             "quote_to_executor_ratio": (Decimal(str(quote_requests)) / Decimal(str(executors_created))) if executors_created > 0 else None,
@@ -1598,6 +1866,16 @@ class AggregatorCexDexArb(StrategyV2Base):
     def _is_vendor_throttle_error(self, error: Any) -> bool:
         message = str(error).lower()
         return "429" in message or "rate limit" in message or "throttle" in message
+
+    def _is_fatal_order_error(self, error: Any) -> bool:
+        message = str(error).lower()
+        patterns = [
+            r"invalid_currency_pair",
+            r"not in whitelist",
+            r"trading pair .* not available",
+            r"currencypair .* is not in whitelist",
+        ]
+        return any(re.search(pattern, message) for pattern in patterns)
 
     def _is_network_error(self, error: Any) -> bool:
         message = str(error).lower()

@@ -37,12 +37,11 @@ services:
     # build:
     #   context: ./gateway
     #   dockerfile: Dockerfile
-    ports:
-      - "15888:15888"
     volumes:
       - "./gateway-files/conf:/home/gateway/conf"
       - "./gateway-files/logs:/home/gateway/logs"
       - "./certs:/home/gateway/certs"
+    network_mode: host
     environment:
       - GATEWAY_PASSPHRASE=admin
       - DEV=true

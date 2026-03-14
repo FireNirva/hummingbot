@@ -1,6 +1,8 @@
 import asyncio
+import time
+from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from hummingbot.connector.gateway.gateway_base import GatewayBase
 from hummingbot.core.data_type.common import OrderType, TradeType
@@ -13,6 +15,90 @@ class GatewaySwap(GatewayBase):
     Handles swap-specific functionality including price quotes and trade execution.
     Maintains order tracking and wallet interactions in the base class.
     """
+
+    QUOTE_EXECUTION_CACHE_TTL = 10.0
+
+    @dataclass
+    class _QuoteExecutionCacheEntry:
+        quote_id: str
+        created_at: float
+        response: Dict[str, Any]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recent_quote_responses: Dict[
+            Tuple[str, bool, str, Optional[str]],
+            "GatewaySwap._QuoteExecutionCacheEntry",
+        ] = {}
+
+    def _normalize_quote_cache_amount(self, trading_pair: str, amount: Decimal) -> Decimal:
+        try:
+            quantized = self.quantize_order_amount(trading_pair, amount)
+        except Exception:
+            quantized = amount
+        return quantized if quantized is not None else amount
+
+    def _quote_cache_key(
+        self,
+        trading_pair: str,
+        is_buy: bool,
+        amount: Decimal,
+        pool_address: Optional[str] = None,
+    ) -> Tuple[str, bool, str, Optional[str]]:
+        normalized_amount = self._normalize_quote_cache_amount(trading_pair, amount)
+        return trading_pair, is_buy, str(normalized_amount), pool_address
+
+    def _prune_recent_quote_cache(self):
+        now = time.time()
+        stale_keys = [
+            key for key, entry in self._recent_quote_responses.items()
+            if now - entry.created_at > self.QUOTE_EXECUTION_CACHE_TTL
+        ]
+        for key in stale_keys:
+            self._recent_quote_responses.pop(key, None)
+
+    def _cache_quote_response(
+        self,
+        trading_pair: str,
+        is_buy: bool,
+        amount: Decimal,
+        pool_address: Optional[str],
+        response: Dict[str, Any],
+    ):
+        quote_id = response.get("quoteId")
+        if quote_id is None:
+            return
+        self._prune_recent_quote_cache()
+        key = self._quote_cache_key(trading_pair, is_buy, amount, pool_address)
+        self._recent_quote_responses[key] = self._QuoteExecutionCacheEntry(
+            quote_id=quote_id,
+            created_at=time.time(),
+            response=response,
+        )
+
+    def get_recent_quote_id(
+        self,
+        trading_pair: str,
+        is_buy: bool,
+        amount: Decimal,
+        pool_address: Optional[str] = None,
+    ) -> Optional[str]:
+        self._prune_recent_quote_cache()
+        key = self._quote_cache_key(trading_pair, is_buy, amount, pool_address)
+        entry = self._recent_quote_responses.get(key)
+        return entry.quote_id if entry is not None else None
+
+    def _consume_recent_quote_id(
+        self,
+        trading_pair: str,
+        is_buy: bool,
+        amount: Decimal,
+        pool_address: Optional[str] = None,
+    ) -> Optional[str]:
+        self._prune_recent_quote_cache()
+        key = self._quote_cache_key(trading_pair, is_buy, amount, pool_address)
+        entry = self._recent_quote_responses.pop(key, None)
+        return entry.quote_id if entry is not None else None
 
     @async_ttl_cache(ttl=2, maxsize=10)
     async def get_quote_price(
@@ -46,6 +132,7 @@ class GatewaySwap(GatewayBase):
                 slippage_pct=slippage_pct,
                 pool_address=pool_address
             )
+            self._cache_quote_response(trading_pair, is_buy, amount, pool_address, resp)
             price = resp.get("price", None)
             return Decimal(price) if price is not None else None
         except asyncio.CancelledError:
@@ -145,15 +232,45 @@ class GatewaySwap(GatewayBase):
                                   amount=amount)
         try:
             # Check if we have a quote_id to execute
-            quote_id = kwargs.get("quote_id")
-            if quote_id:
-                # Use execute_quote if we have a quote_id
-                order_result: Dict[str, Any] = await self._get_gateway_instance().execute_quote(
-                    connector=self.connector_name,
-                    quote_id=quote_id,
-                    network=self.network,
-                    wallet_address=self.address
+            explicit_quote_id = kwargs.get("quote_id")
+            quote_id = explicit_quote_id
+            cached_quote_id = None
+            pool_address = kwargs.get("pool_address")
+            if quote_id is None:
+                cached_quote_id = self._consume_recent_quote_id(
+                    trading_pair=trading_pair,
+                    is_buy=trade_type == TradeType.BUY,
+                    amount=amount,
+                    pool_address=pool_address,
                 )
+                quote_id = cached_quote_id
+            if quote_id:
+                try:
+                    # Use execute_quote if we have a quote_id
+                    order_result: Dict[str, Any] = await self._get_gateway_instance().execute_quote(
+                        connector=self.connector_name,
+                        quote_id=quote_id,
+                        network=self.network,
+                        wallet_address=self.address
+                    )
+                except Exception as e:
+                    if cached_quote_id is None:
+                        raise
+                    self.logger().warning(
+                        f"Cached quote execution failed for {trading_pair} {trade_type.name}. "
+                        f"Falling back to execute_swap: {e}"
+                    )
+                    order_result = await self._get_gateway_instance().execute_swap(
+                        connector=self.connector_name,
+                        base_asset=base,
+                        quote_asset=quote,
+                        side=trade_type,
+                        amount=amount,
+                        slippage_pct=kwargs.get("slippage_pct"),
+                        pool_address=pool_address,
+                        network=self.network,
+                        wallet_address=self.address
+                    )
             else:
                 # Use execute_swap for direct swaps without quote
                 order_result: Dict[str, Any] = await self._get_gateway_instance().execute_swap(
@@ -162,6 +279,8 @@ class GatewaySwap(GatewayBase):
                     quote_asset=quote,
                     side=trade_type,
                     amount=amount,
+                    slippage_pct=kwargs.get("slippage_pct"),
+                    pool_address=pool_address,
                     network=self.network,
                     wallet_address=self.address
                 )

@@ -46,6 +46,7 @@ class DexQuoteSnapshot:
     trigger_source: str
     refresh_reason: str
     latency_ms: Optional[float] = None
+    quote_id: Optional[str] = None
 
 
 @dataclass
@@ -459,6 +460,11 @@ class AggregatorCexDexArb(StrategyV2Base):
         actions = self.determine_executor_actions()
         if not actions:
             return
+        self._dispatch_executor_actions(actions)
+
+    def _dispatch_executor_actions(self, actions: List[Any]):
+        if not actions:
+            return
         for action in actions:
             if isinstance(action, CreateExecutorAction):
                 observation = self._executor_observations.get(action.executor_config.id)
@@ -570,6 +576,7 @@ class AggregatorCexDexArb(StrategyV2Base):
                 trigger_source=snapshot.trigger_source if snapshot else None,
                 refresh_reason=snapshot.refresh_reason if snapshot else None,
                 dex_quote_latency_ms=snapshot.latency_ms if snapshot else None,
+                dex_quote_id=snapshot.quote_id if snapshot else None,
             )
             executor_config = self._build_executor_config(best_direction, amount)
             self._executor_observations[executor_config.id] = ExecutorObservation(
@@ -587,7 +594,9 @@ class AggregatorCexDexArb(StrategyV2Base):
                 self._format_decimal(amount),
                 self._format_pct(best_profit),
             )
-            self._pending_create_action = CreateExecutorAction(executor_config=executor_config)
+            if self._has_active_executor():
+                return
+            self._dispatch_executor_actions([CreateExecutorAction(executor_config=executor_config)])
 
     def _quantize_amount(self, amount: Decimal) -> Decimal:
         quantized = self.market_data_provider.quantize_order_amount(
@@ -980,9 +989,16 @@ class AggregatorCexDexArb(StrategyV2Base):
         self._quote_request_timestamps.append(request_ts)
         self._metrics["expensive_quote_requests"] += 1
         start = time.perf_counter()
+        quote_id: Optional[str] = None
         try:
             quote_price = await self.connectors[self.config.dex_connector].get_quote_price(
                 self.config.dex_trading_pair, is_buy, amount
+            )
+            quote_id = self._get_connector_quote_id(
+                connector_name=self.config.dex_connector,
+                trading_pair=self.config.dex_trading_pair,
+                is_buy=is_buy,
+                amount=amount,
             )
         except Exception as exc:
             latency_ms = (time.perf_counter() - start) * 1000
@@ -1070,6 +1086,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             trigger_source=decision.trigger_source,
             refresh_reason=decision.trigger_reason,
             latency_ms=latency_ms,
+            quote_id=quote_id,
         )
         self._quote_latency_ms_total += latency_ms
         self._quote_latency_samples += 1
@@ -1090,6 +1107,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             dex_event_signal=decision.dex_event_signal,
             latency_ms=latency_ms,
             quote_price=quote_price,
+            quote_id=quote_id,
         )
         self._mark_dex_event_consumed(direction, decision.dex_event_signal)
         return True
@@ -1486,6 +1504,24 @@ class AggregatorCexDexArb(StrategyV2Base):
             prioritize_non_amm_first=self.config.executor_prioritize_non_amm_first,
             retry_failed_orders=self.config.executor_retry_failed_orders,
         )
+
+    def _get_connector_quote_id(
+        self,
+        connector_name: str,
+        trading_pair: str,
+        is_buy: bool,
+        amount: Decimal,
+    ) -> Optional[str]:
+        connector = self.connectors.get(connector_name)
+        if connector is None:
+            return None
+        getter = getattr(connector, "get_recent_quote_id", None)
+        if getter is None or not callable(getter):
+            return None
+        try:
+            return getter(trading_pair, is_buy, amount)
+        except Exception:
+            return None
 
     def _initialize_phase0_observability(self):
         self._open_event_log()

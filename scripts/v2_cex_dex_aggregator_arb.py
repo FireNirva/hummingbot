@@ -35,6 +35,7 @@ from hummingbot.strategy_v2.executors.arbitrage_executor.data_types import Arbit
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, StopExecutorAction
+from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 
@@ -92,6 +93,9 @@ class ExecutorObservation:
     trigger_source: str
     refresh_reason: str
     created_timestamp: float
+    first_leg_completed_timestamp: Optional[float] = None
+    last_progress_timestamp: Optional[float] = None
+    watchdog_reason: Optional[str] = None
 
 
 class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
@@ -275,6 +279,24 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         ge=1,
         description="Trip after this many consecutive DEX order failures.",
     )
+    executor_watchdog_enabled: bool = Field(
+        default=True,
+        description="Enable executor watchdogs that fail stuck arbitrage executors before they block scouting indefinitely.",
+    )
+    executor_watchdog_no_order_submission_timeout_sec: Decimal = Field(
+        default=Decimal("10"),
+        gt=0,
+        description="Fail an arbitrage executor if it does not submit any leg within this many seconds after creation.",
+    )
+    executor_watchdog_leg2_submission_timeout_sec: Decimal = Field(
+        default=Decimal("5"),
+        gt=0,
+        description="Fail an arbitrage executor if leg 1 completes but leg 2 is still not submitted after this many seconds.",
+    )
+    executor_watchdog_stop_strategy_on_leg2_timeout: bool = Field(
+        default=True,
+        description="Stop further scouting when leg 1 completed but leg 2 was never submitted, since inventory may be exposed.",
+    )
 
     @field_validator(
         "order_amount",
@@ -292,6 +314,8 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         "dex_event_price_move_trigger_pct",
         "dex_event_base_amount_move_trigger_pct",
         "dex_event_quote_amount_move_trigger_pct",
+        "executor_watchdog_no_order_submission_timeout_sec",
+        "executor_watchdog_leg2_submission_timeout_sec",
     )
     @classmethod
     def quantize_decimal_fields(cls, value: Optional[Decimal]) -> Optional[Decimal]:
@@ -425,12 +449,14 @@ class AggregatorCexDexArb(StrategyV2Base):
         super().on_tick()
         self.update_executors_info()
         self._track_executor_lifecycle()
+        self._watchdog_live_executors()
         self._maybe_emit_metrics_summary()
         if self._is_stop_triggered:
             return
         self._execute_local_executor_actions()
         self.update_executors_info()
         self._track_executor_lifecycle()
+        self._watchdog_live_executors()
         self._maybe_emit_metrics_summary()
         if self._has_active_executor():
             return
@@ -1568,6 +1594,10 @@ class AggregatorCexDexArb(StrategyV2Base):
             rate_oracle_enabled=self.config.rate_oracle_enabled,
             quote_conversion_rate=self.config.quote_conversion_rate,
             gas_price=self.config.gas_price if self.config.gas_price is not None else self.config.gas_token_price_quote,
+            executor_watchdog_enabled=self.config.executor_watchdog_enabled,
+            executor_watchdog_no_order_submission_timeout_sec=self.config.executor_watchdog_no_order_submission_timeout_sec,
+            executor_watchdog_leg2_submission_timeout_sec=self.config.executor_watchdog_leg2_submission_timeout_sec,
+            executor_watchdog_stop_strategy_on_leg2_timeout=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
             event_log_path=str(self._event_log_path) if self._event_log_path else None,
         )
 
@@ -1650,6 +1680,174 @@ class AggregatorCexDexArb(StrategyV2Base):
             if executor.status == RunnableStatus.TERMINATED and executor.id not in self._closed_executor_ids:
                 self._closed_executor_ids.add(executor.id)
                 self._record_trade_closed(executor)
+
+    def _watchdog_live_executors(self):
+        if not self.config.executor_watchdog_enabled:
+            return
+        now = self._now()
+        for executor in self._get_live_arbitrage_executors():
+            if executor.is_closed:
+                continue
+            observation = self._executor_observations.get(executor.config.id)
+            if observation is None or observation.watchdog_reason is not None:
+                continue
+
+            self._update_watchdog_progress(executor, observation, now)
+
+            if self._maybe_fail_no_order_submission(executor, observation, now):
+                continue
+
+            self._maybe_fail_second_leg_timeout(executor, observation, now)
+
+    def _get_live_arbitrage_executors(self) -> List[Any]:
+        live_executors: List[Any] = []
+        for executors_list in self.executor_orchestrator.active_executors.values():
+            for executor in executors_list:
+                if getattr(getattr(executor, "config", None), "type", None) == "arbitrage_executor":
+                    live_executors.append(executor)
+        return live_executors
+
+    def _update_watchdog_progress(self, executor: Any, observation: ExecutorObservation, now: float):
+        if observation.last_progress_timestamp is None:
+            observation.last_progress_timestamp = observation.created_timestamp
+
+        first_leg_side = getattr(executor, "_first_order_side", None)
+        if first_leg_side not in {"buy", "sell"}:
+            return
+
+        first_tracked_order = executor.buy_order if first_leg_side == "buy" else executor.sell_order
+        if (
+            observation.first_leg_completed_timestamp is None
+            and first_tracked_order.order is not None
+            and first_tracked_order.order.is_filled
+        ):
+            observation.first_leg_completed_timestamp = first_tracked_order.last_update_timestamp or now
+            observation.last_progress_timestamp = observation.first_leg_completed_timestamp
+
+    def _maybe_fail_no_order_submission(self, executor: Any, observation: ExecutorObservation, now: float) -> bool:
+        if executor.buy_order.order_id is not None or executor.sell_order.order_id is not None:
+            return False
+
+        elapsed = now - observation.created_timestamp
+        if elapsed < float(self.config.executor_watchdog_no_order_submission_timeout_sec):
+            return False
+
+        self._fail_executor_from_watchdog(
+            executor=executor,
+            observation=observation,
+            reason="no_order_submitted",
+            context={
+                "elapsed_sec": round(elapsed, 3),
+                "executor_status": executor.status.name if isinstance(executor.status, Enum) else str(executor.status),
+                "buy_connector": executor.buying_market.connector_name,
+                "buy_trading_pair": executor.buying_market.trading_pair,
+                "sell_connector": executor.selling_market.connector_name,
+                "sell_trading_pair": executor.selling_market.trading_pair,
+            },
+            halt_strategy=False,
+        )
+        return True
+
+    def _maybe_fail_second_leg_timeout(self, executor: Any, observation: ExecutorObservation, now: float) -> bool:
+        if executor.concurrent_orders_submission:
+            return False
+
+        if observation.first_leg_completed_timestamp is None:
+            return False
+
+        second_leg_side = getattr(executor, "_second_order_side", None)
+        if second_leg_side not in {"buy", "sell"}:
+            return False
+
+        second_tracked_order = executor.buy_order if second_leg_side == "buy" else executor.sell_order
+        if second_tracked_order.order_id is not None:
+            return False
+
+        elapsed = now - observation.first_leg_completed_timestamp
+        if elapsed < float(self.config.executor_watchdog_leg2_submission_timeout_sec):
+            return False
+
+        first_leg_side = getattr(executor, "_first_order_side", "unknown")
+        first_tracked_order = executor.buy_order if first_leg_side == "buy" else executor.sell_order
+        self._fail_executor_from_watchdog(
+            executor=executor,
+            observation=observation,
+            reason="second_leg_not_submitted",
+            context={
+                "elapsed_sec": round(elapsed, 3),
+                "first_leg_side": first_leg_side,
+                "second_leg_side": second_leg_side,
+                "first_leg_order_id": first_tracked_order.order_id,
+                "first_leg_exchange_order_id": (
+                    getattr(first_tracked_order.order, "exchange_order_id", None)
+                    if first_tracked_order.order is not None
+                    else None
+                ),
+                "first_leg_executed_amount_base": first_tracked_order.executed_amount_base,
+                "buy_connector": executor.buying_market.connector_name,
+                "buy_trading_pair": executor.buying_market.trading_pair,
+                "sell_connector": executor.selling_market.connector_name,
+                "sell_trading_pair": executor.selling_market.trading_pair,
+            },
+            halt_strategy=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
+        )
+        return True
+
+    def _fail_executor_from_watchdog(
+        self,
+        executor: Any,
+        observation: ExecutorObservation,
+        reason: str,
+        context: Dict[str, Any],
+        halt_strategy: bool,
+    ):
+        if observation.watchdog_reason is not None:
+            return
+
+        observation.watchdog_reason = reason
+        self._metrics["executor_watchdog_trips"] += 1
+        self._emit_event(
+            "executor_watchdog_trip",
+            executor_id=executor.config.id,
+            opportunity_id=observation.opportunity_id,
+            direction=observation.direction,
+            expected_profit_pct=observation.expected_profit,
+            reason=reason,
+            halt_strategy=halt_strategy,
+            context=context,
+        )
+
+        self.logger().error(
+            "Executor watchdog triggered (%s) for executor %s. Context: %s",
+            reason,
+            executor.config.id,
+            context,
+        )
+
+        executor.close_type = CloseType.FAILED
+        executor.stop()
+
+        if halt_strategy:
+            self._halt_strategy_after_executor_watchdog(reason=reason, executor=executor, context=context)
+
+    def _halt_strategy_after_executor_watchdog(self, reason: str, executor: Any, context: Dict[str, Any]):
+        if self._is_stop_triggered:
+            return
+        self._pending_create_action = None
+        self._is_stop_triggered = True
+        self._emit_event(
+            "strategy_halt",
+            reason="executor_watchdog_critical",
+            watchdog_reason=reason,
+            executor_id=executor.config.id,
+            context=context,
+        )
+        message = (
+            f"Strategy halted after executor watchdog trigger ({reason}) on {executor.config.id}. "
+            "A leg may be partially executed and requires review."
+        )
+        self.logger().error(message)
+        self.notify_hb_app_with_timestamp(message)
 
     def _record_trade_closed(self, executor: ExecutorInfo):
         self._metrics["trades_closed"] += 1
@@ -1906,6 +2104,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             "orders_failed": self._metrics["orders_failed"],
             "orders_cancelled": self._metrics["orders_cancelled"],
             "trades_closed": trades_closed,
+            "executor_watchdog_trips": self._metrics["executor_watchdog_trips"],
             "vendor_429_count": self._metrics["vendor_429_count"],
             "circuit_breaker_active": self._circuit_breaker_active,
             "circuit_breaker_reason": self._circuit_breaker_reason,

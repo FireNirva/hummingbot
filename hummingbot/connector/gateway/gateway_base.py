@@ -208,10 +208,15 @@ class GatewayBase(ConnectorBase):
         }
 
     def restore_tracking_states(self, saved_states: Dict[str, any]):
-        self._order_tracker._in_flight_orders.update({
-            key: GatewayInFlightOrder.from_json(value)
-            for key, value in saved_states.items()
-        })
+        # Only restore truly open orders. Older gateway logic restored every
+        # serialized order, which resurrected filled/failed historical orders
+        # and caused endless status polling after bot restarts.
+        for serialized_order in saved_states.values():
+            order = GatewayInFlightOrder.from_json(serialized_order)
+            if order.is_open:
+                self._order_tracker.start_tracking_order(order)
+            elif order.is_failure:
+                self._order_tracker._lost_orders[order.client_order_id] = order
 
     @staticmethod
     def create_market_order_id(side: TradeType, trading_pair: str) -> str:
@@ -570,7 +575,11 @@ class GatewayBase(ConnectorBase):
             client_order_id=order_id,
             trading_pair=trading_pair,
             update_timestamp=self.current_timestamp,
-            new_state=OrderState.FAILED
+            new_state=OrderState.FAILED,
+            misc_updates={
+                "error_message": str(error),
+                "error_type": type(error).__name__,
+            }
         )
         self._order_tracker.process_order_update(order_update)
 
@@ -581,19 +590,43 @@ class GatewayBase(ConnectorBase):
         if len(tracked_orders) < 1:
             return
 
-        tx_hash_list: List[str] = [
-            tx_hash for tx_hash in await safe_gather(
-                *[tracked_order.get_exchange_order_id() for tracked_order in tracked_orders],
-                return_exceptions=True
-            )
-            if not isinstance(tx_hash, Exception)
-        ]
+        exchange_order_id_results = await safe_gather(
+            *[tracked_order.get_exchange_order_id() for tracked_order in tracked_orders],
+            return_exceptions=True
+        )
+
+        valid_orders: List[GatewayInFlightOrder] = []
+        tx_hash_list: List[str] = []
+        for tracked_order, tx_hash_result in zip(tracked_orders, exchange_order_id_results):
+            if isinstance(tx_hash_result, Exception) or tx_hash_result in (None, ""):
+                self.logger().warning(
+                    f"Could not get transaction hash for {tracked_order.client_order_id}. "
+                    f"Current state: {tracked_order.current_state.name}. Marking as failed."
+                )
+                order_update: OrderUpdate = OrderUpdate(
+                    client_order_id=tracked_order.client_order_id,
+                    trading_pair=tracked_order.trading_pair,
+                    update_timestamp=self.current_timestamp,
+                    new_state=OrderState.FAILED,
+                    misc_updates={
+                        "error_message": "Missing transaction hash while polling gateway order status.",
+                        "error_type": "MissingTransactionHash",
+                    }
+                )
+                self._order_tracker.process_order_update(order_update)
+                continue
+
+            valid_orders.append(tracked_order)
+            tx_hash_list.append(tx_hash_result)
 
         self.logger().info(
             "Polling for order status updates of %d orders. Transaction hashes: %s",
-            len(tracked_orders),
+            len(valid_orders),
             tx_hash_list
         )
+
+        if len(valid_orders) < 1:
+            return
 
         update_results: List[Union[Dict[str, Any], Exception]] = await safe_gather(*[
             self._get_gateway_instance().get_transaction_status(
@@ -604,7 +637,7 @@ class GatewayBase(ConnectorBase):
             for tx_hash in tx_hash_list
         ], return_exceptions=True)
 
-        for tracked_order, tx_details in zip(tracked_orders, update_results):
+        for tracked_order, tx_details in zip(valid_orders, update_results):
             if isinstance(tx_details, Exception):
                 self.logger().error(f"An error occurred fetching transaction status of {tracked_order.client_order_id}")
                 continue
@@ -646,7 +679,11 @@ class GatewayBase(ConnectorBase):
                     client_order_id=tracked_order.client_order_id,
                     trading_pair=tracked_order.trading_pair,
                     update_timestamp=self.current_timestamp,
-                    new_state=OrderState.FAILED
+                    new_state=OrderState.FAILED,
+                    misc_updates={
+                        "error_message": f"Transaction failed: {tx_details}",
+                        "error_type": "TransactionFailed",
+                    }
                 )
                 self._order_tracker.process_order_update(order_update)
 

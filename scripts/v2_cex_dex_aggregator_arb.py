@@ -1910,6 +1910,12 @@ class AggregatorCexDexArb(StrategyV2Base):
             r"not in whitelist",
             r"trading pair .* not available",
             r"currencypair .* is not in whitelist",
+            r"insufficient allowance",
+            r"allowance .* expired",
+            r"permit2 allowance",
+            r"please approve",
+            r"universal router",
+            r"missing transaction hash",
         ]
         return any(re.search(pattern, message) for pattern in patterns)
 

@@ -37,6 +37,8 @@ class GatewayBase(ConnectorBase):
     POLL_INTERVAL = 1.0
     BALANCE_POLL_INTERVAL = 60.0  # Update balances every 60 seconds
     APPROVAL_ORDER_ID_PATTERN = re.compile(r"approve-(\w+)-(\w+)")
+    MISSING_TX_HASH_FAILURE_COUNT = 3
+    MISSING_TX_HASH_MIN_AGE = 90.0
 
     _connector_name: str
     _name: str
@@ -108,6 +110,7 @@ class GatewayBase(ConnectorBase):
         self._amount_quantum_dict = {}
         self._token_data = {}  # Store complete token information
         self._allowances = {}
+        self._missing_tx_hash_attempts: Dict[str, int] = {}
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -555,6 +558,7 @@ class GatewayBase(ConnectorBase):
         """
         Stops tracking an order by simply removing it from _in_flight_orders dictionary in ClientOrderTracker.
         """
+        self._missing_tx_hash_attempts.pop(order_id, None)
         self._order_tracker.stop_tracking_order(client_order_id=order_id)
 
     def _handle_operation_failure(self, order_id: str, trading_pair: str, operation_name: str, error: Exception):
@@ -599,23 +603,45 @@ class GatewayBase(ConnectorBase):
         tx_hash_list: List[str] = []
         for tracked_order, tx_hash_result in zip(tracked_orders, exchange_order_id_results):
             if isinstance(tx_hash_result, Exception) or tx_hash_result in (None, ""):
-                self.logger().warning(
-                    f"Could not get transaction hash for {tracked_order.client_order_id}. "
-                    f"Current state: {tracked_order.current_state.name}. Marking as failed."
+                order_age = max(0.0, self.current_timestamp - tracked_order.creation_timestamp)
+                attempts = self._missing_tx_hash_attempts.get(tracked_order.client_order_id, 0) + 1
+                self._missing_tx_hash_attempts[tracked_order.client_order_id] = attempts
+                should_fail_order = (
+                    attempts >= self.MISSING_TX_HASH_FAILURE_COUNT
+                    and order_age >= self.MISSING_TX_HASH_MIN_AGE
                 )
-                order_update: OrderUpdate = OrderUpdate(
-                    client_order_id=tracked_order.client_order_id,
-                    trading_pair=tracked_order.trading_pair,
-                    update_timestamp=self.current_timestamp,
-                    new_state=OrderState.FAILED,
-                    misc_updates={
-                        "error_message": "Missing transaction hash while polling gateway order status.",
-                        "error_type": "MissingTransactionHash",
-                    }
-                )
-                self._order_tracker.process_order_update(order_update)
+
+                if should_fail_order:
+                    self.logger().warning(
+                        f"Could not get transaction hash for {tracked_order.client_order_id} after "
+                        f"{attempts} attempts and {order_age:.1f}s. Current state: "
+                        f"{tracked_order.current_state.name}. Marking as failed."
+                    )
+                    order_update: OrderUpdate = OrderUpdate(
+                        client_order_id=tracked_order.client_order_id,
+                        trading_pair=tracked_order.trading_pair,
+                        update_timestamp=self.current_timestamp,
+                        new_state=OrderState.FAILED,
+                        misc_updates={
+                            "error_message": (
+                                "Missing transaction hash while polling gateway order status "
+                                f"after {attempts} attempts."
+                            ),
+                            "error_type": "MissingTransactionHash",
+                        }
+                    )
+                    self._order_tracker.process_order_update(order_update)
+                    self._missing_tx_hash_attempts.pop(tracked_order.client_order_id, None)
+                else:
+                    self.logger().warning(
+                        f"Could not get transaction hash for {tracked_order.client_order_id}. "
+                        f"Current state: {tracked_order.current_state.name}. "
+                        f"Retrying ({attempts}/{self.MISSING_TX_HASH_FAILURE_COUNT}) after "
+                        f"{order_age:.1f}s since creation."
+                    )
                 continue
 
+            self._missing_tx_hash_attempts.pop(tracked_order.client_order_id, None)
             valid_orders.append(tracked_order)
             tx_hash_list.append(tx_hash_result)
 
@@ -720,6 +746,7 @@ class GatewayBase(ConnectorBase):
         """
         Helper to create and process an OrderUpdate from a transaction hash and result dict.
         """
+        self._missing_tx_hash_attempts.pop(order_id, None)
         # Extract fee from data field if present (new response format)
         # Otherwise fall back to top-level fee field (legacy format)
         fee = 0

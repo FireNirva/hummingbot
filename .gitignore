@@ -115,3 +115,9 @@ Miniconda3-*.sh
 .claude/
 .cursor/
 .agents/
+
+# Local research / troubleshooting artifacts
+/docs/**
+/bin/tune_dex_event_params.py
+/.gateway-hotfix/
+/build.pid

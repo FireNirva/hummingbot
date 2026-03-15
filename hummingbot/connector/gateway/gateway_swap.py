@@ -100,6 +100,19 @@ class GatewaySwap(GatewayBase):
         entry = self._recent_quote_responses.pop(key, None)
         return entry.quote_id if entry is not None else None
 
+    @staticmethod
+    def _should_fallback_after_explicit_quote_failure(error: Exception) -> bool:
+        message = str(error).lower()
+        retryable_patterns = (
+            "quote not found or expired",
+            "quote expired",
+            "too little received",
+            "toolittlereceived",
+            "insufficientamountout",
+            "transaction would fail",
+        )
+        return any(pattern in message for pattern in retryable_patterns)
+
     @async_ttl_cache(ttl=2, maxsize=10)
     async def get_quote_price(
             self,
@@ -254,10 +267,11 @@ class GatewaySwap(GatewayBase):
                         wallet_address=self.address
                     )
                 except Exception as e:
-                    if cached_quote_id is None:
+                    if cached_quote_id is None and not self._should_fallback_after_explicit_quote_failure(e):
                         raise
+                    fallback_reason = "cached quote" if cached_quote_id is not None else "explicit quote_id"
                     self.logger().warning(
-                        f"Cached quote execution failed for {trading_pair} {trade_type.name}. "
+                        f"{fallback_reason.capitalize()} execution failed for {trading_pair} {trade_type.name}. "
                         f"Falling back to execute_swap: {e}"
                     )
                     order_result = await self._get_gateway_instance().execute_swap(

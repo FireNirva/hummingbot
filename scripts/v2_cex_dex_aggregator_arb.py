@@ -47,6 +47,7 @@ class DexQuoteSnapshot:
     refresh_reason: str
     latency_ms: Optional[float] = None
     quote_id: Optional[str] = None
+    quote_id_consumed: bool = False
 
 
 @dataclass
@@ -181,6 +182,11 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         default=24,
         ge=1,
         description="Maximum number of external DEX quote requests per rolling minute",
+    )
+    quote_id_reuse_max_age_sec: Decimal = Field(
+        default=Decimal("5"),
+        gt=0,
+        description="Maximum age for safely reusing a router quote_id during execution. Older quotes fall back to fresh execution.",
     )
     quote_trigger_buffer_pct: Decimal = Field(
         default=Decimal("0.002"),
@@ -333,6 +339,8 @@ class AggregatorCexDexArb(StrategyV2Base):
                     config.markets.setdefault(watch_market.connector_name, set()).add(watch_market.trading_pair)
         super().__init__(connectors, config)
         self.config = config
+        # Persist completed executors immediately so sqlite history stays current.
+        self.closed_executors_buffer = 0
 
         self._pending_create_action: Optional[CreateExecutorAction] = None
         self._evaluation_task: Optional[asyncio.Task] = None
@@ -1474,7 +1482,10 @@ class AggregatorCexDexArb(StrategyV2Base):
         self._last_no_opportunity_log = now
 
     def _build_executor_config(self, direction: str, amount: Decimal) -> ArbitrageExecutorConfig:
+        buying_quote_id: Optional[str] = None
+        selling_quote_id: Optional[str] = None
         if direction == self.BUY_DEX_SELL_CEX:
+            dex_snapshot = self._quote_cache.get(self.BUY_DEX_SELL_CEX)
             buying_market = ConnectorPair(
                 connector_name=self.config.dex_connector,
                 trading_pair=self.config.dex_trading_pair,
@@ -1483,7 +1494,9 @@ class AggregatorCexDexArb(StrategyV2Base):
                 connector_name=self.config.cex_connector,
                 trading_pair=self.config.cex_trading_pair,
             )
+            buying_quote_id = self._consume_snapshot_quote_id(dex_snapshot)
         else:
+            dex_snapshot = self._quote_cache.get(self.BUY_CEX_SELL_DEX)
             buying_market = ConnectorPair(
                 connector_name=self.config.cex_connector,
                 trading_pair=self.config.cex_trading_pair,
@@ -1492,6 +1505,7 @@ class AggregatorCexDexArb(StrategyV2Base):
                 connector_name=self.config.dex_connector,
                 trading_pair=self.config.dex_trading_pair,
             )
+            selling_quote_id = self._consume_snapshot_quote_id(dex_snapshot)
 
         return ArbitrageExecutorConfig(
             timestamp=self._now(),
@@ -1503,6 +1517,8 @@ class AggregatorCexDexArb(StrategyV2Base):
             concurrent_orders_submission=self.config.executor_concurrent_orders_submission,
             prioritize_non_amm_first=self.config.executor_prioritize_non_amm_first,
             retry_failed_orders=self.config.executor_retry_failed_orders,
+            buying_quote_id=buying_quote_id,
+            selling_quote_id=selling_quote_id,
         )
 
     def _get_connector_quote_id(
@@ -1522,6 +1538,19 @@ class AggregatorCexDexArb(StrategyV2Base):
             return getter(trading_pair, is_buy, amount)
         except Exception:
             return None
+
+    def _consume_snapshot_quote_id(self, snapshot: Optional[DexQuoteSnapshot]) -> Optional[str]:
+        if snapshot is None or snapshot.quote_id is None:
+            return None
+        if snapshot.quote_id_consumed:
+            return None
+        snapshot_age = self._snapshot_age(snapshot)
+        if snapshot_age is None:
+            return None
+        if snapshot_age > float(self.config.quote_id_reuse_max_age_sec):
+            return None
+        snapshot.quote_id_consumed = True
+        return snapshot.quote_id
 
     def _initialize_phase0_observability(self):
         self._open_event_log()

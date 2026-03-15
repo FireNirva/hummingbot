@@ -14,3 +14,5 @@ class ArbitrageExecutorConfig(ExecutorConfigBase):
     concurrent_orders_submission: bool = True
     prioritize_non_amm_first: bool = False
     retry_failed_orders: bool = True
+    buying_quote_id: Optional[str] = None
+    selling_quote_id: Optional[str] = None

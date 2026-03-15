@@ -222,6 +222,9 @@ class ArbitrageExecutor(ExecutorBase):
             self.place_sell_arbitrage_order()
 
     def place_buy_arbitrage_order(self):
+        order_kwargs = {}
+        if self.buying_market.is_amm_connector() and self.config.buying_quote_id is not None:
+            order_kwargs["quote_id"] = self.config.buying_quote_id
         self.buy_order.order_id = self.place_order(
             connector_name=self.buying_market.connector_name,
             trading_pair=self.buying_market.trading_pair,
@@ -229,9 +232,13 @@ class ArbitrageExecutor(ExecutorBase):
             side=TradeType.BUY,
             amount=self.order_amount,
             price=self._last_buy_price,
+            **order_kwargs,
         )
 
     def place_sell_arbitrage_order(self):
+        order_kwargs = {}
+        if self.selling_market.is_amm_connector() and self.config.selling_quote_id is not None:
+            order_kwargs["quote_id"] = self.config.selling_quote_id
         self.sell_order.order_id = self.place_order(
             connector_name=self.selling_market.connector_name,
             trading_pair=self.selling_market.trading_pair,
@@ -239,6 +246,7 @@ class ArbitrageExecutor(ExecutorBase):
             side=TradeType.SELL,
             amount=self.order_amount,
             price=self._last_sell_price,
+            **order_kwargs,
         )
 
     async def update_tx_cost(self):

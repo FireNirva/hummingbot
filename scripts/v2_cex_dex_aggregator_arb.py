@@ -293,6 +293,11 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         gt=0,
         description="Fail an arbitrage executor if leg 1 completes but leg 2 is still not submitted after this many seconds.",
     )
+    executor_watchdog_leg2_stall_timeout_sec: Decimal = Field(
+        default=Decimal("30"),
+        gt=0,
+        description="Fail an arbitrage executor if leg 2 is submitted but makes no progress for this many seconds after leg 1 completion.",
+    )
     executor_watchdog_stop_strategy_on_leg2_timeout: bool = Field(
         default=True,
         description="Stop further scouting when leg 1 completed but leg 2 was never submitted, since inventory may be exposed.",
@@ -316,6 +321,7 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         "dex_event_quote_amount_move_trigger_pct",
         "executor_watchdog_no_order_submission_timeout_sec",
         "executor_watchdog_leg2_submission_timeout_sec",
+        "executor_watchdog_leg2_stall_timeout_sec",
     )
     @classmethod
     def quantize_decimal_fields(cls, value: Optional[Decimal]) -> Optional[Decimal]:
@@ -1597,6 +1603,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             executor_watchdog_enabled=self.config.executor_watchdog_enabled,
             executor_watchdog_no_order_submission_timeout_sec=self.config.executor_watchdog_no_order_submission_timeout_sec,
             executor_watchdog_leg2_submission_timeout_sec=self.config.executor_watchdog_leg2_submission_timeout_sec,
+            executor_watchdog_leg2_stall_timeout_sec=self.config.executor_watchdog_leg2_stall_timeout_sec,
             executor_watchdog_stop_strategy_on_leg2_timeout=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
             event_log_path=str(self._event_log_path) if self._event_log_path else None,
         )
@@ -1697,7 +1704,10 @@ class AggregatorCexDexArb(StrategyV2Base):
             if self._maybe_fail_no_order_submission(executor, observation, now):
                 continue
 
-            self._maybe_fail_second_leg_timeout(executor, observation, now)
+            if self._maybe_fail_second_leg_timeout(executor, observation, now):
+                continue
+
+            self._maybe_fail_second_leg_stall(executor, observation, now)
 
     def _get_live_arbitrage_executors(self) -> List[Any]:
         live_executors: List[Any] = []
@@ -1792,6 +1802,80 @@ class AggregatorCexDexArb(StrategyV2Base):
             halt_strategy=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
         )
         return True
+
+    def _maybe_fail_second_leg_stall(self, executor: Any, observation: ExecutorObservation, now: float) -> bool:
+        if executor.concurrent_orders_submission:
+            return False
+
+        if observation.first_leg_completed_timestamp is None:
+            return False
+
+        second_leg_side = getattr(executor, "_second_order_side", None)
+        if second_leg_side not in {"buy", "sell"}:
+            return False
+
+        second_tracked_order = executor.buy_order if second_leg_side == "buy" else executor.sell_order
+        if second_tracked_order.order_id is None:
+            return False
+
+        tracked_order = second_tracked_order.order
+        if tracked_order is not None and tracked_order.is_done:
+            return False
+
+        progress_ts = self._get_order_progress_timestamp(second_tracked_order, fallback=observation.first_leg_completed_timestamp)
+        if progress_ts is None:
+            return False
+
+        elapsed = now - progress_ts
+        if elapsed < float(self.config.executor_watchdog_leg2_stall_timeout_sec):
+            return False
+
+        first_leg_side = getattr(executor, "_first_order_side", "unknown")
+        first_tracked_order = executor.buy_order if first_leg_side == "buy" else executor.sell_order
+        self._fail_executor_from_watchdog(
+            executor=executor,
+            observation=observation,
+            reason="second_leg_stalled",
+            context={
+                "elapsed_sec": round(elapsed, 3),
+                "first_leg_side": first_leg_side,
+                "second_leg_side": second_leg_side,
+                "first_leg_order_id": first_tracked_order.order_id,
+                "second_leg_order_id": second_tracked_order.order_id,
+                "second_leg_has_in_flight_order": tracked_order is not None,
+                "second_leg_last_update_timestamp": (
+                    getattr(tracked_order, "last_update_timestamp", None)
+                    if tracked_order is not None
+                    else None
+                ),
+                "second_leg_creation_timestamp": (
+                    getattr(tracked_order, "creation_timestamp", None)
+                    if tracked_order is not None
+                    else None
+                ),
+                "buy_connector": executor.buying_market.connector_name,
+                "buy_trading_pair": executor.buying_market.trading_pair,
+                "sell_connector": executor.selling_market.connector_name,
+                "sell_trading_pair": executor.selling_market.trading_pair,
+            },
+            halt_strategy=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
+        )
+        return True
+
+    def _get_order_progress_timestamp(self, tracked_order: Any, fallback: Optional[float] = None) -> Optional[float]:
+        order = getattr(tracked_order, "order", None)
+        if order is None:
+            return fallback
+
+        last_update_timestamp = getattr(order, "last_update_timestamp", None)
+        if last_update_timestamp is not None:
+            return last_update_timestamp
+
+        creation_timestamp = getattr(order, "creation_timestamp", None)
+        if creation_timestamp is not None:
+            return creation_timestamp
+
+        return fallback
 
     def _fail_executor_from_watchdog(
         self,

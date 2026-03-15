@@ -17,6 +17,7 @@ from hummingbot.core.data_type.trade_fee import AddedToCostTradeFee
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
     BuyOrderCreatedEvent,
+    MarketOrderFailureEvent,
     MarketEvent,
     OrderFilledEvent,
     SellOrderCreatedEvent,
@@ -400,6 +401,52 @@ class MarketsRecorderTests(IsolatedAsyncioWrapperTestCase):
         self.assertEqual(MarketEvent.BuyOrderCreated.name, order_status[0].status)
         self.assertEqual(MarketEvent.BuyOrderCompleted.name, order_status[1].status)
         self.assertEqual(0, len(trade_fills))
+
+    def test_fail_order_without_create_persists_placeholder_order(self):
+        recorder = MarketsRecorder(
+            sql=self.manager,
+            markets=[self],
+            config_file_path=self.config_file_path,
+            strategy_name=self.strategy_name,
+            market_data_collection=MarketDataCollectionConfigMap(
+                market_data_collection_enabled=False,
+                market_data_collection_interval=60,
+                market_data_collection_depth=20,
+            ),
+        )
+
+        tracked_order = MagicMock()
+        tracked_order.trading_pair = self.trading_pair
+        tracked_order.order_type = OrderType.MARKET
+        tracked_order.amount = Decimal("1")
+        tracked_order.creation_timestamp = 1640001112.223
+        tracked_order.leverage = 1
+        tracked_order.position = PositionAction.NIL
+        tracked_order.price = Decimal("1000")
+        tracked_order.exchange_order_id = None
+        self.get_order = MagicMock(return_value=tracked_order)
+
+        fail_event = MarketOrderFailureEvent(
+            timestamp=1642020000,
+            order_id="OID-FAILED-1",
+            order_type=OrderType.MARKET,
+            error_message="simulated failure",
+            error_type="TestFailure",
+        )
+
+        recorder._did_fail_order(MarketEvent.OrderFailure.value, self, fail_event)
+
+        with self.manager.get_new_session() as session:
+            order = session.query(Order).filter(Order.id == fail_event.order_id).one_or_none()
+            self.assertIsNotNone(order)
+            self.assertEqual(self.config_file_path, order.config_file_path)
+            self.assertEqual(self.strategy_name, order.strategy)
+            self.assertEqual(self.display_name, order.market)
+            self.assertEqual(self.trading_pair, order.symbol)
+            self.assertEqual(Decimal("1"), order.amount)
+            self.assertEqual(MarketEvent.OrderFailure.name, order.last_status)
+            self.assertEqual(1, len(order.status))
+            self.assertEqual(MarketEvent.OrderFailure.name, order.status[0].status)
 
     @patch("hummingbot.connector.markets_recorder.MarketsRecorder._sleep")
     def test_market_data_collection_enabled(self, sleep_mock):

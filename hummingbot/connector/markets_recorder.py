@@ -6,7 +6,7 @@ import threading
 import time
 from decimal import Decimal
 from shutil import move
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 from sqlalchemy.orm import Query, Session
@@ -397,6 +397,70 @@ class MarketsRecorder:
                 market.add_exchange_order_ids_from_market_recorder({evt.exchange_order_id: evt.order_id})
                 self.save_market_states(self._config_file_path, market, session=session)
 
+    @staticmethod
+    def _get_tracked_order_from_market(market: ConnectorBase, order_id: str) -> Optional[Any]:
+        get_order = getattr(market, "get_order", None)
+        if callable(get_order):
+            try:
+                tracked_order = get_order(order_id)
+                if tracked_order is not None:
+                    return tracked_order
+            except Exception:
+                pass
+
+        order_tracker = getattr(market, "_order_tracker", None)
+        if order_tracker is not None and hasattr(order_tracker, "fetch_order"):
+            try:
+                return order_tracker.fetch_order(client_order_id=order_id)
+            except Exception:
+                pass
+
+        return None
+
+    def _create_placeholder_order_record(
+        self,
+        session: Session,
+        market: ConnectorBase,
+        tracked_order: Any,
+        order_id: str,
+        event_type: MarketEvent,
+        timestamp: int,
+    ) -> Optional[Order]:
+        trading_pair = getattr(tracked_order, "trading_pair", None)
+        order_type = getattr(tracked_order, "order_type", None)
+        amount = getattr(tracked_order, "amount", None)
+        creation_timestamp = getattr(tracked_order, "creation_timestamp", None)
+
+        if trading_pair is None or order_type is None or amount is None or creation_timestamp is None:
+            return None
+
+        base_asset, quote_asset = trading_pair.split("-")
+        leverage = getattr(tracked_order, "leverage", 1) or 1
+        position = getattr(tracked_order, "position", None)
+        position_value = position.value if hasattr(position, "value") else position
+        price = getattr(tracked_order, "price", Decimal(0)) or Decimal(0)
+
+        order_record = Order(
+            id=order_id,
+            config_file_path=self._config_file_path,
+            strategy=self._strategy_name,
+            market=market.display_name,
+            symbol=trading_pair,
+            base_asset=base_asset,
+            quote_asset=quote_asset,
+            creation_timestamp=int(creation_timestamp * 1e3),
+            order_type=order_type.name if hasattr(order_type, "name") else str(order_type),
+            amount=Decimal(amount),
+            leverage=leverage,
+            price=Decimal(price),
+            position=position_value if position_value else PositionAction.NIL.value,
+            last_status=event_type.name,
+            last_update_timestamp=timestamp,
+            exchange_order_id=getattr(tracked_order, "exchange_order_id", None),
+        )
+        session.add(order_record)
+        return order_record
+
     def _did_fill_order(self,
                         event_tag: int,
                         market: ConnectorBase,
@@ -532,6 +596,18 @@ class MarketsRecorder:
         with self._sql_manager.get_new_session() as session:
             with session.begin():
                 order_record: Optional[Order] = session.query(Order).filter(Order.id == order_id).one_or_none()
+
+                if order_record is None:
+                    tracked_order = self._get_tracked_order_from_market(market, order_id)
+                    if tracked_order is not None:
+                        order_record = self._create_placeholder_order_record(
+                            session=session,
+                            market=market,
+                            tracked_order=tracked_order,
+                            order_id=order_id,
+                            event_type=event_type,
+                            timestamp=timestamp,
+                        )
 
                 if order_record is not None:
                     order_record.last_status = event_type.name

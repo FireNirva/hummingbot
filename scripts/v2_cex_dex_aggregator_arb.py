@@ -98,6 +98,8 @@ class ExecutorObservation:
     last_progress_timestamp: Optional[float] = None
     watchdog_reason: Optional[str] = None
     recovery_id: Optional[str] = None
+    below_threshold_check_count: int = 0
+    last_below_threshold_profit: Optional[Decimal] = None
 
 
 @dataclass
@@ -307,10 +309,28 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         default=True,
         description="Enable executor watchdogs that fail stuck arbitrage executors before they block scouting indefinitely.",
     )
+    executor_creation_recheck_enabled: bool = Field(
+        default=True,
+        description="Recheck the selected opportunity immediately before creating an executor.",
+    )
+    executor_creation_recheck_refresh_quote: bool = Field(
+        default=True,
+        description="Force one fresh DEX quote for the selected direction before executor creation, bypassing cooldown but still respecting budget.",
+    )
     executor_watchdog_no_order_submission_timeout_sec: Decimal = Field(
         default=Decimal("10"),
         gt=0,
         description="Fail an arbitrage executor if it does not submit any leg within this many seconds after creation.",
+    )
+    executor_watchdog_below_threshold_grace_sec: Decimal = Field(
+        default=Decimal("2"),
+        gt=0,
+        description="Grace period before failing a no-order executor whose recalculated profitability is already below threshold.",
+    )
+    executor_watchdog_below_threshold_consecutive_checks: int = Field(
+        default=2,
+        ge=1,
+        description="Consecutive below-threshold checks required before failing a no-order executor.",
     )
     executor_watchdog_leg2_submission_timeout_sec: Decimal = Field(
         default=Decimal("5"),
@@ -352,10 +372,12 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         "aggregator_quote_ttl_sec",
         "quote_trigger_buffer_pct",
         "cex_price_move_trigger_pct",
+        "quote_id_reuse_max_age_sec",
         "dex_event_poll_interval_sec",
         "dex_event_price_move_trigger_pct",
         "dex_event_base_amount_move_trigger_pct",
         "dex_event_quote_amount_move_trigger_pct",
+        "executor_watchdog_below_threshold_grace_sec",
         "executor_watchdog_no_order_submission_timeout_sec",
         "executor_watchdog_leg2_submission_timeout_sec",
         "executor_watchdog_leg2_stall_timeout_sec",
@@ -616,6 +638,47 @@ class AggregatorCexDexArb(StrategyV2Base):
                     cex_bid=cex_bid,
                 )
                 return
+
+            if self.config.executor_creation_recheck_enabled:
+                recheck = await self._recheck_opportunity_before_creation(
+                    direction=best_direction,
+                    amount=amount,
+                )
+                if recheck is None:
+                    self._metrics["opportunities_skipped"] += 1
+                    self._emit_event(
+                        "opportunity_skipped",
+                        reason="pre_create_recheck_failed",
+                        amount=amount,
+                        best_direction=best_direction,
+                        best_profit_pct=best_profit,
+                        threshold_pct=self.config.min_profitability,
+                    )
+                    return
+
+                cex_ask, cex_bid, rechecked_profit_map = recheck
+                rechecked_direction, rechecked_profit = self._select_best_direction(rechecked_profit_map)
+                if (
+                    rechecked_direction != best_direction
+                    or rechecked_profit is None
+                    or rechecked_profit < self.config.min_profitability
+                ):
+                    self._metrics["opportunities_skipped"] += 1
+                    self._emit_event(
+                        "opportunity_skipped",
+                        reason="pre_create_recheck_below_threshold",
+                        amount=amount,
+                        best_direction=best_direction,
+                        rechecked_direction=rechecked_direction,
+                        best_profit_pct=best_profit,
+                        rechecked_profit_pct=rechecked_profit,
+                        threshold_pct=self.config.min_profitability,
+                        profit_map=rechecked_profit_map,
+                        cex_ask=cex_ask,
+                        cex_bid=cex_bid,
+                    )
+                    return
+                best_profit = rechecked_profit
 
             snapshot = self._quote_cache.get(best_direction)
             opportunity_id = f"opp-{uuid.uuid4().hex[:12]}"
@@ -1039,10 +1102,11 @@ class AggregatorCexDexArb(StrategyV2Base):
         amount: Decimal,
         reference_cex_price: Decimal,
         decision: QuoteRefreshDecision,
+        ignore_cooldown: bool = False,
     ) -> bool:
         if self._is_stop_triggered:
             return False
-        can_request, skip_reason = self._can_request_expensive_quote(direction)
+        can_request, skip_reason = self._can_request_expensive_quote(direction, ignore_cooldown=ignore_cooldown)
         if not can_request:
             metric_name = "expensive_quote_skipped_by_budget" if skip_reason == "budget" else "expensive_quote_skipped_by_cooldown"
             self._metrics[metric_name] += 1
@@ -1191,13 +1255,17 @@ class AggregatorCexDexArb(StrategyV2Base):
         self._mark_dex_event_consumed(direction, decision.dex_event_signal)
         return True
 
-    def _can_request_expensive_quote(self, direction: str) -> Tuple[bool, Optional[str]]:
+    def _can_request_expensive_quote(self, direction: str, ignore_cooldown: bool = False) -> Tuple[bool, Optional[str]]:
         now = self._now()
         while self._quote_request_timestamps and (now - self._quote_request_timestamps[0]) > 60:
             self._quote_request_timestamps.popleft()
 
         last_request = self._last_quote_request_ts.get(direction)
-        if last_request is not None and (now - last_request) < float(self.config.aggregator_quote_cooldown_sec):
+        if (
+            not ignore_cooldown
+            and last_request is not None
+            and (now - last_request) < float(self.config.aggregator_quote_cooldown_sec)
+        ):
             return False, "cooldown"
 
         if len(self._quote_request_timestamps) >= self.config.aggregator_quote_budget_per_minute:
@@ -1211,6 +1279,32 @@ class AggregatorCexDexArb(StrategyV2Base):
                 self._last_budget_log = now
             return False, "budget"
         return True, None
+
+    async def _recheck_opportunity_before_creation(
+        self, direction: str, amount: Decimal
+    ) -> Optional[Tuple[Decimal, Decimal, Dict[str, Decimal]]]:
+        cex_prices = self._get_cex_vwap_prices(amount)
+        if cex_prices is None:
+            return None
+        cex_ask, cex_bid = cex_prices
+
+        if self.config.executor_creation_recheck_refresh_quote:
+            is_buy = direction == self.BUY_DEX_SELL_CEX
+            reference_cex_price = cex_bid if direction == self.BUY_DEX_SELL_CEX else cex_ask
+            await self._refresh_dex_quote(
+                direction=direction,
+                is_buy=is_buy,
+                amount=amount,
+                reference_cex_price=reference_cex_price,
+                decision=QuoteRefreshDecision(
+                    should_refresh=True,
+                    trigger_source="pre_create_recheck",
+                    trigger_reason="executor_precheck",
+                ),
+                ignore_cooldown=True,
+            )
+
+        return cex_ask, cex_bid, self._estimate_profit_map(amount, cex_ask, cex_bid)
 
     def _record_quote_success(self):
         self._consecutive_quote_failures = 0
@@ -1743,6 +1837,9 @@ class AggregatorCexDexArb(StrategyV2Base):
 
             self._update_watchdog_progress(executor, observation, now)
 
+            if self._maybe_fail_below_threshold_before_submission(executor, observation, now):
+                continue
+
             if self._maybe_fail_no_order_submission(executor, observation, now):
                 continue
 
@@ -1778,6 +1875,8 @@ class AggregatorCexDexArb(StrategyV2Base):
 
     def _maybe_fail_no_order_submission(self, executor: Any, observation: ExecutorObservation, now: float) -> bool:
         if executor.buy_order.order_id is not None or executor.sell_order.order_id is not None:
+            observation.below_threshold_check_count = 0
+            observation.last_below_threshold_profit = None
             return False
 
         elapsed = now - observation.created_timestamp
@@ -1791,6 +1890,53 @@ class AggregatorCexDexArb(StrategyV2Base):
             context={
                 "elapsed_sec": round(elapsed, 3),
                 "executor_status": executor.status.name if isinstance(executor.status, Enum) else str(executor.status),
+                "buy_connector": executor.buying_market.connector_name,
+                "buy_trading_pair": executor.buying_market.trading_pair,
+                "sell_connector": executor.selling_market.connector_name,
+                "sell_trading_pair": executor.selling_market.trading_pair,
+            },
+            halt_strategy=False,
+        )
+        return True
+
+    def _maybe_fail_below_threshold_before_submission(
+        self, executor: Any, observation: ExecutorObservation, now: float
+    ) -> bool:
+        if executor.buy_order.order_id is not None or executor.sell_order.order_id is not None:
+            observation.below_threshold_check_count = 0
+            observation.last_below_threshold_profit = None
+            return False
+
+        elapsed = now - observation.created_timestamp
+        if elapsed < float(self.config.executor_watchdog_below_threshold_grace_sec):
+            return False
+
+        current_profitability = getattr(executor, "_current_profitability", None)
+        if current_profitability is None:
+            return False
+
+        current_profitability = Decimal(str(current_profitability))
+        if current_profitability >= executor.min_profitability:
+            observation.below_threshold_check_count = 0
+            observation.last_below_threshold_profit = current_profitability
+            return False
+
+        observation.below_threshold_check_count += 1
+        observation.last_below_threshold_profit = current_profitability
+        if observation.below_threshold_check_count < self.config.executor_watchdog_below_threshold_consecutive_checks:
+            return False
+
+        self._fail_executor_from_watchdog(
+            executor=executor,
+            observation=observation,
+            reason="below_threshold_before_submission",
+            context={
+                "elapsed_sec": round(elapsed, 3),
+                "executor_status": executor.status.name if isinstance(executor.status, Enum) else str(executor.status),
+                "expected_profit_pct": observation.expected_profit,
+                "current_profit_pct": current_profitability,
+                "threshold_pct": executor.min_profitability,
+                "check_count": observation.below_threshold_check_count,
                 "buy_connector": executor.buying_market.connector_name,
                 "buy_trading_pair": executor.buying_market.trading_pair,
                 "sell_connector": executor.selling_market.connector_name,

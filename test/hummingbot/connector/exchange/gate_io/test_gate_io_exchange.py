@@ -1075,6 +1075,57 @@ class TestGateIoExchange(IsolatedAsyncioWrapperTestCase):
         )
 
     @aioresponses()
+    def test_reconcile_order_fills_on_timeout_fetches_trade_updates_via_rest(self, mock_api):
+        self.exchange._set_current_timestamp(1640780000)
+
+        self.exchange.start_tracking_order(
+            order_id="OID1",
+            exchange_order_id="EOID1",
+            trading_pair=self.trading_pair,
+            order_type=OrderType.LIMIT,
+            trade_type=TradeType.BUY,
+            price=Decimal("10000"),
+            amount=Decimal("1"),
+        )
+        order: InFlightOrder = self.exchange.in_flight_orders["OID1"]
+
+        order_trade_updates_url = f"{CONSTANTS.REST_URL}/{CONSTANTS.MY_TRADES_PATH_URL}"
+        regex_order_trade_updates_url = re.compile(
+            f"^{order_trade_updates_url}".replace(".", r"\.").replace("?", r"\?")
+        )
+        order_trade_updates_resp = [{
+            "id": 12345,
+            "create_time": "1640780000",
+            "create_time_ms": "1640780000000.0",
+            "currency_pair": self.ex_trading_pair,
+            "side": "buy",
+            "amount": "1",
+            "price": "10000",
+            "fee": "0.1",
+            "fee_currency": self.quote_asset,
+            "text": order.client_order_id,
+            "order_id": order.exchange_order_id,
+        }]
+        mock_api.get(
+            regex_order_trade_updates_url,
+            body=json.dumps(order_trade_updates_resp)
+        )
+
+        trade_updates = self.async_run_with_timeout(self.exchange.reconcile_order_fills_on_timeout(order))
+
+        self.assertEqual(1, len(trade_updates))
+        self.assertEqual(order.client_order_id, trade_updates[0].client_order_id)
+        self.assertEqual(order.exchange_order_id, trade_updates[0].exchange_order_id)
+        self.assertEqual(Decimal("1"), trade_updates[0].fill_base_amount)
+        self.assertEqual(Decimal("10000"), trade_updates[0].fill_price)
+        self.assertTrue(
+            self._is_logged(
+                "INFO",
+                f"Attempting active REST fill reconciliation for {order.client_order_id} after fill update timeout."
+            )
+        )
+
+    @aioresponses()
     def test_update_order_status_when_cancelled(self, mock_api):
         self.exchange._set_current_timestamp(1640780000)
 

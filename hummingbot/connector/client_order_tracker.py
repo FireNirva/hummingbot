@@ -282,10 +282,12 @@ class ClientOrderTracker:
                         tracked_order.wait_until_completely_filled(), timeout=self.TRADE_FILLS_WAIT_TIMEOUT
                     )
                 except asyncio.TimeoutError:
-                    self.logger().warning(
-                        f"The order fill updates did not arrive on time for {tracked_order.client_order_id}. "
-                        f"The complete update will be processed with incomplete information."
-                    )
+                    fills_reconciled = await self._reconcile_order_fills_on_timeout(tracked_order)
+                    if not fills_reconciled:
+                        self.logger().warning(
+                            f"The order fill updates did not arrive on time for {tracked_order.client_order_id}. "
+                            f"The complete update will be processed with incomplete information."
+                        )
 
             previous_state: OrderState = tracked_order.current_state
 
@@ -303,6 +305,33 @@ class ClientOrderTracker:
                     del self._lost_orders[lost_order.client_order_id]
             else:
                 self.logger().debug(f"Order is not/no longer being tracked ({order_update})")
+
+    async def _reconcile_order_fills_on_timeout(self, tracked_order: InFlightOrder) -> bool:
+        reconciliation_method = getattr(self._connector, "reconcile_order_fills_on_timeout", None)
+        fills_reconciled = False
+
+        if reconciliation_method is None:
+            return fills_reconciled
+
+        try:
+            trade_updates = await reconciliation_method(tracked_order)
+            for trade_update in trade_updates:
+                self.process_trade_update(trade_update)
+            fills_reconciled = tracked_order.completely_filled_event.is_set()
+            if fills_reconciled:
+                self.logger().info(
+                    f"Recovered timed out fill updates for {tracked_order.client_order_id} via connector reconciliation."
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as reconciliation_error:
+            self.logger().warning(
+                f"Failed to reconcile timed out fill updates for {tracked_order.client_order_id}: "
+                f"{reconciliation_error}",
+                exc_info=reconciliation_error,
+            )
+
+        return fills_reconciled
 
     def _trigger_created_event(self, order: InFlightOrder):
         event_tag = MarketEvent.BuyOrderCreated if order.trade_type is TradeType.BUY else MarketEvent.SellOrderCreated

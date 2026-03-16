@@ -296,6 +296,12 @@ class GateIoExchange(ExchangePyBase):
 
         return trade_updates
 
+    async def reconcile_order_fills_on_timeout(self, order: InFlightOrder) -> List[TradeUpdate]:
+        self.logger().info(
+            f"Attempting active REST fill reconciliation for {order.client_order_id} after fill update timeout."
+        )
+        return await self._all_trade_updates_for_order(order)
+
     async def _request_order_status(self, tracked_order: InFlightOrder) -> OrderUpdate:
         try:
             exchange_order_id = await tracked_order.get_exchange_order_id()

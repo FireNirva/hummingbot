@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from decimal import Decimal
 from typing import Awaitable, Dict
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from hummingbot.connector.client_order_tracker import ClientOrderTracker
 from hummingbot.connector.exchange_base import ExchangeBase
@@ -756,6 +756,56 @@ class ClientOrderTrackerUnitTest(unittest.TestCase):
         self.tracker.process_trade_update(trade_update)
         self.assertEqual(1, len(self.tracker.active_orders))
         self.assertEqual(0, len(self.tracker.cached_orders))
+
+    @patch("hummingbot.connector.client_order_tracker.ClientOrderTracker.TRADE_FILLS_WAIT_TIMEOUT", 0.01)
+    def test_process_order_update_reconciles_fill_updates_after_timeout(self):
+        order: InFlightOrder = InFlightOrder(
+            client_order_id="someClientOrderId",
+            exchange_order_id="someExchangeOrderId",
+            trading_pair=self.trading_pair,
+            order_type=OrderType.LIMIT,
+            trade_type=TradeType.BUY,
+            amount=Decimal("1000.0"),
+            creation_timestamp=1640001112.0,
+            price=Decimal("1.0"),
+            initial_state=OrderState.OPEN,
+        )
+        self.tracker.start_tracking_order(order)
+
+        fee_paid = self.trade_fee_percent * order.amount
+        trade_update = TradeUpdate(
+            trade_id="trade-1",
+            client_order_id=order.client_order_id,
+            exchange_order_id=order.exchange_order_id,
+            trading_pair=order.trading_pair,
+            fill_price=order.price,
+            fill_base_amount=order.amount,
+            fill_quote_amount=order.price * order.amount,
+            fee=AddedToCostTradeFee(flat_fees=[TokenAmount(token=self.quote_asset, amount=fee_paid)]),
+            fill_timestamp=2,
+        )
+        self.connector.reconcile_order_fills_on_timeout = AsyncMock(return_value=[trade_update])
+
+        filled_order_update = OrderUpdate(
+            client_order_id=order.client_order_id,
+            exchange_order_id=order.exchange_order_id,
+            trading_pair=self.trading_pair,
+            update_timestamp=3,
+            new_state=OrderState.FILLED,
+        )
+
+        self.async_run_with_timeout(self.tracker.process_order_update(filled_order_update))
+
+        self.connector.reconcile_order_fills_on_timeout.assert_awaited_once_with(order)
+        self.assertTrue(order.is_done)
+        self.assertEqual(order.amount, order.executed_amount_base)
+        self.assertEqual(order.price * order.amount, order.executed_amount_quote)
+        self.assertTrue(
+            self._is_logged(
+                "INFO",
+                f"Recovered timed out fill updates for {order.client_order_id} via connector reconciliation.",
+            )
+        )
 
     def test_process_order_not_found_invalid_order(self):
         self.assertEqual(0, len(self.tracker.active_orders))

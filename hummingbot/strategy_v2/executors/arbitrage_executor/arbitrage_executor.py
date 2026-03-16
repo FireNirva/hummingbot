@@ -67,6 +67,7 @@ class ArbitrageExecutor(ExecutorBase):
         self.concurrent_orders_submission = config.concurrent_orders_submission
         self.prioritize_non_amm_first = config.prioritize_non_amm_first
         self.retry_failed_orders = config.retry_failed_orders
+        self.execution_mode = config.execution_mode
 
         # Order tracking
         self._buy_order: TrackedOrder = TrackedOrder()
@@ -208,6 +209,22 @@ class ArbitrageExecutor(ExecutorBase):
     def _resolve_order_submission_sequence(self):
         buy_is_amm = self.buying_market.is_amm_connector()
         sell_is_amm = self.selling_market.is_amm_connector()
+        if self.execution_mode == "cex_first":
+            if buy_is_amm and not sell_is_amm:
+                return "sell", "buy"
+            if sell_is_amm and not buy_is_amm:
+                return "buy", "sell"
+        elif self.execution_mode == "dex_first":
+            if buy_is_amm and not sell_is_amm:
+                return "buy", "sell"
+            if sell_is_amm and not buy_is_amm:
+                return "sell", "buy"
+        elif self.execution_mode == "auto":
+            # Current production heuristic:
+            # For buy-cex / sell-dex opportunities, prefer DEX first to reduce
+            # the chance of ending with a filled CEX leg and a failed DEX leg.
+            if sell_is_amm and not buy_is_amm:
+                return "sell", "buy"
         if self.prioritize_non_amm_first:
             if buy_is_amm and not sell_is_amm:
                 return "sell", "buy"
@@ -401,6 +418,7 @@ class ArbitrageExecutor(ExecutorBase):
             "concurrent_orders_submission": self.concurrent_orders_submission,
             "prioritize_non_amm_first": self.prioritize_non_amm_first,
             "retry_failed_orders": self.retry_failed_orders,
+            "execution_mode": self.execution_mode,
         }
 
     def to_format_status(self):

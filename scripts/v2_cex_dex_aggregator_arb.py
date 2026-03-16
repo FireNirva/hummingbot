@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Set, TextIO, Tuple
+from typing import Any, Deque, Dict, List, Literal, Optional, Set, TextIO, Tuple
 
 from pydantic import Field, field_validator
 
@@ -118,6 +118,7 @@ class RecoveryAttempt:
     estimated_recovery_price: Optional[Decimal]
     estimated_loss_pct: Optional[Decimal]
     started_timestamp: float
+    quote_id: Optional[str] = None
     order_id: Optional[str] = None
     status: str = "PENDING_SUBMISSION"
     source_order_id: Optional[str] = None
@@ -195,6 +196,10 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
     executor_retry_failed_orders: bool = Field(
         default=False,
         description="Retry failed arbitrage leg orders from the executor.",
+    )
+    execution_mode: Literal["auto", "cex_first", "dex_first"] = Field(
+        default="auto",
+        description="Sequential execution policy. 'auto' currently chooses DEX-first for buy-cex/sell-dex opportunities and keeps legacy behavior otherwise.",
     )
     no_opportunity_log_interval: int = Field(default=30, ge=0)
 
@@ -353,6 +358,10 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
     recovery_cex_revert_enabled: bool = Field(
         default=True,
         description="When CEX leg completed first and DEX leg failed, submit one reverse CEX order to flatten inventory.",
+    )
+    recovery_dex_revert_enabled: bool = Field(
+        default=False,
+        description="When DEX leg completed first and CEX leg failed, allow one conservative reverse DEX order to flatten inventory.",
     )
     recovery_cex_revert_max_loss_pct: Decimal = Field(
         default=Decimal("0.01"),
@@ -1682,6 +1691,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             concurrent_orders_submission=self.config.executor_concurrent_orders_submission,
             prioritize_non_amm_first=self.config.executor_prioritize_non_amm_first,
             retry_failed_orders=self.config.executor_retry_failed_orders,
+            execution_mode=self.config.execution_mode,
             buying_quote_id=buying_quote_id,
             selling_quote_id=selling_quote_id,
         )
@@ -1733,6 +1743,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             rate_oracle_enabled=self.config.rate_oracle_enabled,
             quote_conversion_rate=self.config.quote_conversion_rate,
             gas_price=self.config.gas_price if self.config.gas_price is not None else self.config.gas_token_price_quote,
+            execution_mode=self.config.execution_mode,
             executor_watchdog_enabled=self.config.executor_watchdog_enabled,
             executor_watchdog_no_order_submission_timeout_sec=self.config.executor_watchdog_no_order_submission_timeout_sec,
             executor_watchdog_leg2_submission_timeout_sec=self.config.executor_watchdog_leg2_submission_timeout_sec,
@@ -1740,6 +1751,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             executor_watchdog_stop_strategy_on_leg2_timeout=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
             recovery_executor_enabled=self.config.recovery_executor_enabled,
             recovery_cex_revert_enabled=self.config.recovery_cex_revert_enabled,
+            recovery_dex_revert_enabled=self.config.recovery_dex_revert_enabled,
             recovery_cex_revert_max_loss_pct=self.config.recovery_cex_revert_max_loss_pct,
             event_log_path=str(self._event_log_path) if self._event_log_path else None,
         )
@@ -2544,7 +2556,7 @@ class AggregatorCexDexArb(StrategyV2Base):
 
         if not first_tracked_order.is_filled or first_tracked_order.executed_amount_base <= Decimal("0"):
             return False
-        if first_market.is_amm_connector() or not second_market.is_amm_connector():
+        if first_market.is_amm_connector() == second_market.is_amm_connector():
             return self._enter_manual_recovery_required(
                 executor=executor,
                 observation=observation,
@@ -2558,14 +2570,6 @@ class AggregatorCexDexArb(StrategyV2Base):
             )
         if second_tracked_order.is_filled:
             return False
-        if not self.config.recovery_cex_revert_enabled:
-            return self._enter_manual_recovery_required(
-                executor=executor,
-                observation=observation,
-                trigger_reason=trigger_reason,
-                reason="auto_recovery_disabled",
-                context=context,
-            )
 
         recovery_amount = self.market_data_provider.quantize_order_amount(
             first_market.connector_name,
@@ -2582,7 +2586,25 @@ class AggregatorCexDexArb(StrategyV2Base):
             )
 
         recovery_side = "SELL" if first_leg_side == "buy" else "BUY"
-        estimated_recovery_price = self._get_cex_recovery_price(
+        is_cex_recovery = not first_market.is_amm_connector()
+        if is_cex_recovery and not self.config.recovery_cex_revert_enabled:
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="auto_cex_recovery_disabled",
+                context=context,
+            )
+        if not is_cex_recovery and not self.config.recovery_dex_revert_enabled:
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="auto_dex_recovery_disabled",
+                context=context,
+            )
+
+        estimated_recovery_price, recovery_quote_id = self._get_recovery_price(
             connector_name=first_market.connector_name,
             trading_pair=first_market.trading_pair,
             side=recovery_side,
@@ -2596,11 +2618,12 @@ class AggregatorCexDexArb(StrategyV2Base):
                 reason="missing_recovery_price",
                 context=context,
             )
-        estimated_loss_pct = self._estimate_cex_recovery_loss_pct(
+        estimated_loss_pct = self._estimate_recovery_loss_pct(
             first_leg_side=first_leg_side,
             first_leg_average_price=first_tracked_order.average_executed_price,
             recovery_side=recovery_side,
             recovery_price=estimated_recovery_price,
+            fee_rate=self._cex_fee_rate if is_cex_recovery else self._dex_fee_rate,
         )
         if (
             estimated_loss_pct is not None
@@ -2635,6 +2658,7 @@ class AggregatorCexDexArb(StrategyV2Base):
             estimated_recovery_price=estimated_recovery_price,
             estimated_loss_pct=estimated_loss_pct,
             started_timestamp=self._now(),
+            quote_id=recovery_quote_id,
             source_order_id=failed_order_id or second_tracked_order.order_id,
             context=context,
         )
@@ -2669,10 +2693,14 @@ class AggregatorCexDexArb(StrategyV2Base):
                 "side": attempt.side,
                 "amount": attempt.amount,
                 "estimated_loss_pct": attempt.estimated_loss_pct,
+                "quote_id": attempt.quote_id,
             },
         )
 
         try:
+            order_kwargs = {}
+            if attempt.quote_id is not None:
+                order_kwargs["quote_id"] = attempt.quote_id
             if attempt.side == "BUY":
                 attempt.order_id = self.buy(
                     connector_name=attempt.connector_name,
@@ -2680,6 +2708,7 @@ class AggregatorCexDexArb(StrategyV2Base):
                     amount=attempt.amount,
                     order_type=OrderType.MARKET,
                     price=attempt.estimated_recovery_price,
+                    **order_kwargs,
                 )
             else:
                 attempt.order_id = self.sell(
@@ -2688,6 +2717,7 @@ class AggregatorCexDexArb(StrategyV2Base):
                     amount=attempt.amount,
                     order_type=OrderType.MARKET,
                     price=attempt.estimated_recovery_price,
+                    **order_kwargs,
                 )
             attempt.status = "SUBMITTED"
             return True
@@ -2761,29 +2791,77 @@ class AggregatorCexDexArb(StrategyV2Base):
         self.notify_hb_app_with_timestamp(notify_message)
         self._active_recovery = None
 
+    def _get_recovery_price(
+        self,
+        connector_name: str,
+        trading_pair: str,
+        side: str,
+        amount: Decimal,
+    ) -> Tuple[Optional[Decimal], Optional[str]]:
+        connector = self.connectors[connector_name]
+        if connector.is_amm_connector():
+            return self._get_dex_recovery_price(
+                connector_name=connector_name,
+                trading_pair=trading_pair,
+                side=side,
+                amount=amount,
+            )
+        return self._get_cex_recovery_price(
+            connector_name=connector_name,
+            trading_pair=trading_pair,
+            side=side,
+            amount=amount,
+        )
+
     def _get_cex_recovery_price(
         self,
         connector_name: str,
         trading_pair: str,
         side: str,
         amount: Decimal,
-    ) -> Optional[Decimal]:
+    ) -> Tuple[Optional[Decimal], Optional[str]]:
         try:
             connector = self.connectors[connector_name]
             is_buy = side == "BUY"
-            return Decimal(str(connector.get_vwap_for_volume(trading_pair, is_buy, amount).result_price))
+            return Decimal(str(connector.get_vwap_for_volume(trading_pair, is_buy, amount).result_price)), None
         except Exception as exc:
             self.logger().warning(f"Could not get recovery VWAP price for {connector_name} {trading_pair}: {exc}")
-            return None
+            return None, None
 
-    def _estimate_cex_recovery_loss_pct(
+    def _get_dex_recovery_price(
+        self,
+        connector_name: str,
+        trading_pair: str,
+        side: str,
+        amount: Decimal,
+    ) -> Tuple[Optional[Decimal], Optional[str]]:
+        if connector_name != self.config.dex_connector or trading_pair != self.config.dex_trading_pair:
+            return None, None
+
+        if side == "BUY":
+            direction = self.BUY_DEX_SELL_CEX
+        elif side == "SELL":
+            direction = self.BUY_CEX_SELL_DEX
+        else:
+            return None, None
+
+        snapshot = self._quote_cache.get(direction)
+        if snapshot is None:
+            return None, None
+        snapshot_age = self._snapshot_age(snapshot)
+        if snapshot_age is None or snapshot_age > float(self.config.quote_id_reuse_max_age_sec):
+            return None, None
+        return snapshot.price, self._consume_snapshot_quote_id(snapshot)
+
+    def _estimate_recovery_loss_pct(
         self,
         first_leg_side: str,
         first_leg_average_price: Decimal,
         recovery_side: str,
         recovery_price: Decimal,
+        fee_rate: Decimal,
     ) -> Optional[Decimal]:
-        fee = self._cex_fee_rate
+        fee = fee_rate
         if first_leg_average_price <= Decimal("0") or recovery_price <= Decimal("0"):
             return None
         if first_leg_side == "buy" and recovery_side == "SELL":

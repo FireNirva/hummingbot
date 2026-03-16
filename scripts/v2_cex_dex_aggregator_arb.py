@@ -17,6 +17,7 @@ from pydantic import Field, field_validator
 from hummingbot import prefix_path
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.connector.utils import split_hb_trading_pair
+from hummingbot.core.data_type.common import OrderType
 from hummingbot.core.event.event_forwarder import SourceInfoEventForwarder
 from hummingbot.core.event.events import (
     BuyOrderCompletedEvent,
@@ -96,6 +97,29 @@ class ExecutorObservation:
     first_leg_completed_timestamp: Optional[float] = None
     last_progress_timestamp: Optional[float] = None
     watchdog_reason: Optional[str] = None
+    recovery_id: Optional[str] = None
+
+
+@dataclass
+class RecoveryAttempt:
+    recovery_id: str
+    executor_id: str
+    trigger_reason: str
+    connector_name: str
+    trading_pair: str
+    side: str
+    amount: Decimal
+    first_leg_side: str
+    first_leg_connector: str
+    first_leg_trading_pair: str
+    first_leg_average_price: Decimal
+    estimated_recovery_price: Optional[Decimal]
+    estimated_loss_pct: Optional[Decimal]
+    started_timestamp: float
+    order_id: Optional[str] = None
+    status: str = "PENDING_SUBMISSION"
+    source_order_id: Optional[str] = None
+    context: Optional[Dict[str, Any]] = None
 
 
 class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
@@ -302,6 +326,19 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         default=True,
         description="Stop further scouting when leg 1 completed but leg 2 was never submitted, since inventory may be exposed.",
     )
+    recovery_executor_enabled: bool = Field(
+        default=True,
+        description="Enable conservative single-attempt recovery when leg 1 completed and leg 2 fails or times out.",
+    )
+    recovery_cex_revert_enabled: bool = Field(
+        default=True,
+        description="When CEX leg completed first and DEX leg failed, submit one reverse CEX order to flatten inventory.",
+    )
+    recovery_cex_revert_max_loss_pct: Decimal = Field(
+        default=Decimal("0.01"),
+        ge=0,
+        description="Maximum estimated recovery loss pct tolerated for automatic CEX revert recovery.",
+    )
 
     @field_validator(
         "order_amount",
@@ -322,6 +359,7 @@ class AggregatorCexDexArbConfig(StrategyV2ConfigBase):
         "executor_watchdog_no_order_submission_timeout_sec",
         "executor_watchdog_leg2_submission_timeout_sec",
         "executor_watchdog_leg2_stall_timeout_sec",
+        "recovery_cex_revert_max_loss_pct",
     )
     @classmethod
     def quantize_decimal_fields(cls, value: Optional[Decimal]) -> Optional[Decimal]:
@@ -422,6 +460,7 @@ class AggregatorCexDexArb(StrategyV2Base):
         self._executor_observations: Dict[str, ExecutorObservation] = {}
         self._executor_status_cache: Dict[str, Tuple[str, Optional[str]]] = {}
         self._closed_executor_ids: Set[str] = set()
+        self._active_recovery: Optional[RecoveryAttempt] = None
         self._consecutive_quote_failures = 0
         self._consecutive_empty_quotes = 0
         self._consecutive_network_errors = 0
@@ -1605,6 +1644,9 @@ class AggregatorCexDexArb(StrategyV2Base):
             executor_watchdog_leg2_submission_timeout_sec=self.config.executor_watchdog_leg2_submission_timeout_sec,
             executor_watchdog_leg2_stall_timeout_sec=self.config.executor_watchdog_leg2_stall_timeout_sec,
             executor_watchdog_stop_strategy_on_leg2_timeout=self.config.executor_watchdog_stop_strategy_on_leg2_timeout,
+            recovery_executor_enabled=self.config.recovery_executor_enabled,
+            recovery_cex_revert_enabled=self.config.recovery_cex_revert_enabled,
+            recovery_cex_revert_max_loss_pct=self.config.recovery_cex_revert_max_loss_pct,
             event_log_path=str(self._event_log_path) if self._event_log_path else None,
         )
 
@@ -1908,10 +1950,16 @@ class AggregatorCexDexArb(StrategyV2Base):
             context,
         )
 
+        recovery_started = self._maybe_start_recovery_from_executor(
+            executor=executor,
+            observation=observation,
+            trigger_reason=reason,
+            context=context,
+        )
         executor.close_type = CloseType.FAILED
         executor.stop()
 
-        if halt_strategy:
+        if halt_strategy and not recovery_started:
             self._halt_strategy_after_executor_watchdog(reason=reason, executor=executor, context=context)
 
     def _halt_strategy_after_executor_watchdog(self, reason: str, executor: Any, context: Dict[str, Any]):
@@ -1976,6 +2024,21 @@ class AggregatorCexDexArb(StrategyV2Base):
             order_type=event.type,
             exchange_order_id=event.exchange_order_id,
         )
+        if self._active_recovery is not None and self._active_recovery.order_id == event.order_id:
+            self._active_recovery.status = "ORDER_CREATED"
+            self._emit_event(
+                "recovery_order_created",
+                recovery_id=self._active_recovery.recovery_id,
+                executor_id=self._active_recovery.executor_id,
+                connector=connector_name,
+                side=side,
+                order_id=event.order_id,
+                trading_pair=event.trading_pair,
+                amount=event.amount,
+                price=event.price,
+                estimated_loss_pct=self._active_recovery.estimated_loss_pct,
+                trigger_reason=self._active_recovery.trigger_reason,
+            )
 
     def _process_order_filled_event(self, _, market, event: OrderFilledEvent):
         connector_name = self._connector_name_from_market(market)
@@ -2011,6 +2074,30 @@ class AggregatorCexDexArb(StrategyV2Base):
             order_type=event.order_type,
             exchange_order_id=event.exchange_order_id,
         )
+        if self._active_recovery is not None and self._active_recovery.order_id == event.order_id:
+            self._active_recovery.status = "COMPLETED"
+            self._metrics["recovery_completed"] += 1
+            self._emit_event(
+                "recovery_completed",
+                recovery_id=self._active_recovery.recovery_id,
+                executor_id=self._active_recovery.executor_id,
+                connector=connector_name,
+                side=side,
+                order_id=event.order_id,
+                base_asset=event.base_asset,
+                quote_asset=event.quote_asset,
+                base_asset_amount=event.base_asset_amount,
+                quote_asset_amount=event.quote_asset_amount,
+                estimated_loss_pct=self._active_recovery.estimated_loss_pct,
+                trigger_reason=self._active_recovery.trigger_reason,
+            )
+            self._finalize_recovery(
+                reason="completed",
+                notify_message=(
+                    f"Recovery order {event.order_id} completed on {connector_name}. "
+                    "Strategy remains halted for manual review."
+                ),
+            )
 
     def _process_order_failed_event(self, _, market, event: MarketOrderFailureEvent):
         connector_name = self._connector_name_from_market(market)
@@ -2027,6 +2114,45 @@ class AggregatorCexDexArb(StrategyV2Base):
             error_message=error_message,
             error_type=event.error_type,
         )
+        if self._active_recovery is not None and self._active_recovery.order_id == event.order_id:
+            self._active_recovery.status = "FAILED"
+            self._metrics["recovery_failed"] += 1
+            self._emit_event(
+                "recovery_failed",
+                recovery_id=self._active_recovery.recovery_id,
+                executor_id=self._active_recovery.executor_id,
+                connector=connector_name,
+                order_id=event.order_id,
+                error_message=error_message,
+                error_type=event.error_type,
+                trigger_reason=self._active_recovery.trigger_reason,
+            )
+            self._finalize_recovery(
+                reason="failed",
+                notify_message=(
+                    f"Recovery order {event.order_id} failed on {connector_name}. "
+                    "Manual intervention is required."
+                ),
+            )
+            return
+        recovery_executor = self._find_live_executor_by_order_id(event.order_id)
+        if recovery_executor is not None:
+            observation = self._executor_observations.get(recovery_executor.config.id)
+            recovery_handled = self._maybe_start_recovery_from_executor(
+                executor=recovery_executor,
+                observation=observation,
+                trigger_reason="order_failed",
+                context={
+                    "connector": connector_name,
+                    "order_id": event.order_id,
+                    "order_type": str(event.order_type),
+                    "error_message": error_message,
+                    "error_type": str(event.error_type),
+                },
+                failed_order_id=event.order_id,
+            )
+            if recovery_handled:
+                return
         if (
             self.config.circuit_breaker_enabled
             and self.config.circuit_breaker_trip_on_vendor_429
@@ -2089,6 +2215,26 @@ class AggregatorCexDexArb(StrategyV2Base):
             order_id=event.order_id,
             exchange_order_id=event.exchange_order_id,
         )
+        if self._active_recovery is not None and self._active_recovery.order_id == event.order_id:
+            self._active_recovery.status = "CANCELLED"
+            self._metrics["recovery_failed"] += 1
+            self._emit_event(
+                "recovery_failed",
+                recovery_id=self._active_recovery.recovery_id,
+                executor_id=self._active_recovery.executor_id,
+                connector=connector_name,
+                order_id=event.order_id,
+                error_message="recovery order cancelled",
+                error_type="cancelled",
+                trigger_reason=self._active_recovery.trigger_reason,
+            )
+            self._finalize_recovery(
+                reason="cancelled",
+                notify_message=(
+                    f"Recovery order {event.order_id} was cancelled on {connector_name}. "
+                    "Manual intervention is required."
+                ),
+            )
 
     def _connector_name_from_market(self, market: Any) -> str:
         for connector_name, connector in self.connectors.items():
@@ -2189,6 +2335,11 @@ class AggregatorCexDexArb(StrategyV2Base):
             "orders_cancelled": self._metrics["orders_cancelled"],
             "trades_closed": trades_closed,
             "executor_watchdog_trips": self._metrics["executor_watchdog_trips"],
+            "recovery_started": self._metrics["recovery_started"],
+            "recovery_completed": self._metrics["recovery_completed"],
+            "recovery_failed": self._metrics["recovery_failed"],
+            "recovery_manual_required": self._metrics["recovery_manual_required"],
+            "active_recovery_id": self._active_recovery.recovery_id if self._active_recovery is not None else None,
             "vendor_429_count": self._metrics["vendor_429_count"],
             "circuit_breaker_active": self._circuit_breaker_active,
             "circuit_breaker_reason": self._circuit_breaker_reason,
@@ -2205,6 +2356,301 @@ class AggregatorCexDexArb(StrategyV2Base):
             "trigger_reason_distribution": dict(self._trigger_reason_counts),
             "trade_close_type_distribution": dict(self._close_type_counts),
         }
+
+    def _find_live_executor_by_order_id(self, order_id: str) -> Optional[Any]:
+        for executor in self._get_live_arbitrage_executors():
+            if executor.buy_order.order_id == order_id or executor.sell_order.order_id == order_id:
+                return executor
+        return None
+
+    def _maybe_start_recovery_from_executor(
+        self,
+        executor: Any,
+        observation: Optional[ExecutorObservation],
+        trigger_reason: str,
+        context: Dict[str, Any],
+        failed_order_id: Optional[str] = None,
+    ) -> bool:
+        if not self.config.recovery_executor_enabled:
+            return False
+        if self._active_recovery is not None:
+            return False
+        if observation is None or observation.recovery_id is not None:
+            return False
+        if executor.concurrent_orders_submission:
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="concurrent_execution_not_supported",
+                context=context,
+            )
+
+        first_leg_side = getattr(executor, "_first_order_side", None)
+        second_leg_side = getattr(executor, "_second_order_side", None)
+        if first_leg_side not in {"buy", "sell"} or second_leg_side not in {"buy", "sell"}:
+            return False
+
+        first_tracked_order = executor.buy_order if first_leg_side == "buy" else executor.sell_order
+        second_tracked_order = executor.buy_order if second_leg_side == "buy" else executor.sell_order
+        first_market = executor.buying_market if first_leg_side == "buy" else executor.selling_market
+        second_market = executor.buying_market if second_leg_side == "buy" else executor.selling_market
+
+        if not first_tracked_order.is_filled or first_tracked_order.executed_amount_base <= Decimal("0"):
+            return False
+        if first_market.is_amm_connector() or not second_market.is_amm_connector():
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="unsupported_leg_direction_for_auto_recovery",
+                context={
+                    **context,
+                    "first_leg_connector": first_market.connector_name,
+                    "second_leg_connector": second_market.connector_name,
+                },
+            )
+        if second_tracked_order.is_filled:
+            return False
+        if not self.config.recovery_cex_revert_enabled:
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="auto_recovery_disabled",
+                context=context,
+            )
+
+        recovery_amount = self.market_data_provider.quantize_order_amount(
+            first_market.connector_name,
+            first_market.trading_pair,
+            first_tracked_order.executed_amount_base,
+        )
+        if recovery_amount <= Decimal("0"):
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="recovery_amount_quantized_to_zero",
+                context={**context, "executed_amount_base": first_tracked_order.executed_amount_base},
+            )
+
+        recovery_side = "SELL" if first_leg_side == "buy" else "BUY"
+        estimated_recovery_price = self._get_cex_recovery_price(
+            connector_name=first_market.connector_name,
+            trading_pair=first_market.trading_pair,
+            side=recovery_side,
+            amount=recovery_amount,
+        )
+        if estimated_recovery_price is None:
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="missing_recovery_price",
+                context=context,
+            )
+        estimated_loss_pct = self._estimate_cex_recovery_loss_pct(
+            first_leg_side=first_leg_side,
+            first_leg_average_price=first_tracked_order.average_executed_price,
+            recovery_side=recovery_side,
+            recovery_price=estimated_recovery_price,
+        )
+        if (
+            estimated_loss_pct is not None
+            and estimated_loss_pct > self.config.recovery_cex_revert_max_loss_pct
+        ):
+            return self._enter_manual_recovery_required(
+                executor=executor,
+                observation=observation,
+                trigger_reason=trigger_reason,
+                reason="recovery_loss_threshold_exceeded",
+                context={
+                    **context,
+                    "estimated_loss_pct": estimated_loss_pct,
+                    "recovery_threshold_pct": self.config.recovery_cex_revert_max_loss_pct,
+                    "estimated_recovery_price": estimated_recovery_price,
+                },
+            )
+
+        recovery_id = f"recovery-{uuid.uuid4().hex[:12]}"
+        attempt = RecoveryAttempt(
+            recovery_id=recovery_id,
+            executor_id=executor.config.id,
+            trigger_reason=trigger_reason,
+            connector_name=first_market.connector_name,
+            trading_pair=first_market.trading_pair,
+            side=recovery_side,
+            amount=recovery_amount,
+            first_leg_side=first_leg_side,
+            first_leg_connector=first_market.connector_name,
+            first_leg_trading_pair=first_market.trading_pair,
+            first_leg_average_price=first_tracked_order.average_executed_price,
+            estimated_recovery_price=estimated_recovery_price,
+            estimated_loss_pct=estimated_loss_pct,
+            started_timestamp=self._now(),
+            source_order_id=failed_order_id or second_tracked_order.order_id,
+            context=context,
+        )
+        observation.recovery_id = recovery_id
+        self._active_recovery = attempt
+        self._metrics["recovery_started"] += 1
+        self._emit_event(
+            "recovery_started",
+            recovery_id=recovery_id,
+            executor_id=executor.config.id,
+            opportunity_id=observation.opportunity_id,
+            direction=observation.direction,
+            trigger_reason=trigger_reason,
+            connector=attempt.connector_name,
+            trading_pair=attempt.trading_pair,
+            side=attempt.side,
+            amount=attempt.amount,
+            estimated_recovery_price=attempt.estimated_recovery_price,
+            estimated_loss_pct=attempt.estimated_loss_pct,
+            source_order_id=attempt.source_order_id,
+            context=context,
+        )
+
+        self._halt_strategy_for_recovery(
+            reason="recovery_in_progress",
+            context={
+                "recovery_id": recovery_id,
+                "executor_id": executor.config.id,
+                "trigger_reason": trigger_reason,
+                "connector": attempt.connector_name,
+                "trading_pair": attempt.trading_pair,
+                "side": attempt.side,
+                "amount": attempt.amount,
+                "estimated_loss_pct": attempt.estimated_loss_pct,
+            },
+        )
+
+        try:
+            if attempt.side == "BUY":
+                attempt.order_id = self.buy(
+                    connector_name=attempt.connector_name,
+                    trading_pair=attempt.trading_pair,
+                    amount=attempt.amount,
+                    order_type=OrderType.MARKET,
+                    price=attempt.estimated_recovery_price,
+                )
+            else:
+                attempt.order_id = self.sell(
+                    connector_name=attempt.connector_name,
+                    trading_pair=attempt.trading_pair,
+                    amount=attempt.amount,
+                    order_type=OrderType.MARKET,
+                    price=attempt.estimated_recovery_price,
+                )
+            attempt.status = "SUBMITTED"
+            return True
+        except Exception as exc:
+            attempt.status = "FAILED_TO_SUBMIT"
+            self._metrics["recovery_failed"] += 1
+            self._emit_event(
+                "recovery_failed",
+                recovery_id=recovery_id,
+                executor_id=executor.config.id,
+                connector=attempt.connector_name,
+                trading_pair=attempt.trading_pair,
+                side=attempt.side,
+                amount=attempt.amount,
+                error_message=str(exc),
+                trigger_reason=trigger_reason,
+            )
+            self._finalize_recovery(
+                reason="submit_exception",
+                notify_message=(
+                    f"Recovery submission failed for executor {executor.config.id}: {exc}. "
+                    "Manual intervention is required."
+                ),
+            )
+            return True
+
+    def _enter_manual_recovery_required(
+        self,
+        executor: Any,
+        observation: Optional[ExecutorObservation],
+        trigger_reason: str,
+        reason: str,
+        context: Dict[str, Any],
+    ) -> bool:
+        self._metrics["recovery_manual_required"] += 1
+        self._emit_event(
+            "recovery_manual_required",
+            executor_id=executor.config.id,
+            opportunity_id=observation.opportunity_id if observation else None,
+            direction=observation.direction if observation else None,
+            trigger_reason=trigger_reason,
+            reason=reason,
+            context=context,
+        )
+        self._halt_strategy_for_recovery(
+            reason="manual_recovery_required",
+            context={
+                "executor_id": executor.config.id,
+                "trigger_reason": trigger_reason,
+                "reason": reason,
+                **context,
+            },
+        )
+        return True
+
+    def _halt_strategy_for_recovery(self, reason: str, context: Dict[str, Any]):
+        if not self._is_stop_triggered:
+            self._pending_create_action = None
+            self._is_stop_triggered = True
+        self._emit_event(
+            "strategy_halt",
+            reason=reason,
+            context=context,
+        )
+        message = f"Strategy halted for recovery handling ({reason}). Context: {context}"
+        self.logger().error(message)
+        self.notify_hb_app_with_timestamp(message)
+
+    def _finalize_recovery(self, reason: str, notify_message: str):
+        self.logger().error(notify_message)
+        self.notify_hb_app_with_timestamp(notify_message)
+        self._active_recovery = None
+
+    def _get_cex_recovery_price(
+        self,
+        connector_name: str,
+        trading_pair: str,
+        side: str,
+        amount: Decimal,
+    ) -> Optional[Decimal]:
+        try:
+            connector = self.connectors[connector_name]
+            is_buy = side == "BUY"
+            return Decimal(str(connector.get_vwap_for_volume(trading_pair, is_buy, amount).result_price))
+        except Exception as exc:
+            self.logger().warning(f"Could not get recovery VWAP price for {connector_name} {trading_pair}: {exc}")
+            return None
+
+    def _estimate_cex_recovery_loss_pct(
+        self,
+        first_leg_side: str,
+        first_leg_average_price: Decimal,
+        recovery_side: str,
+        recovery_price: Decimal,
+    ) -> Optional[Decimal]:
+        fee = self._cex_fee_rate
+        if first_leg_average_price <= Decimal("0") or recovery_price <= Decimal("0"):
+            return None
+        if first_leg_side == "buy" and recovery_side == "SELL":
+            invested = first_leg_average_price * (Decimal("1") + fee)
+            recovered = recovery_price * (Decimal("1") - fee)
+            pnl_pct = (recovered - invested) / invested
+        elif first_leg_side == "sell" and recovery_side == "BUY":
+            proceeds = first_leg_average_price * (Decimal("1") - fee)
+            repurchase = recovery_price * (Decimal("1") + fee)
+            pnl_pct = (proceeds - repurchase) / proceeds
+        else:
+            return None
+        return max(Decimal("0"), -pnl_pct)
 
     def _snapshot_age(self, snapshot: Optional[DexQuoteSnapshot]) -> Optional[float]:
         if snapshot is None:

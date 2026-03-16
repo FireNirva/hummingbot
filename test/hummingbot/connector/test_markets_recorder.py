@@ -19,6 +19,7 @@ from hummingbot.core.event.events import (
     BuyOrderCreatedEvent,
     MarketOrderFailureEvent,
     MarketEvent,
+    OrderCancelledEvent,
     OrderFilledEvent,
     SellOrderCreatedEvent,
 )
@@ -290,6 +291,42 @@ class MarketsRecorderTests(IsolatedAsyncioWrapperTestCase):
         self.assertEqual(self.config_file_path, trade_fills[0].config_file_path)
         self.assertEqual(fill_event.order_id, trade_fills[0].order_id)
 
+    def test_duplicate_create_order_event_is_idempotent(self):
+        recorder = MarketsRecorder(
+            sql=self.manager,
+            markets=[self],
+            config_file_path=self.config_file_path,
+            strategy_name=self.strategy_name,
+            market_data_collection=MarketDataCollectionConfigMap(
+                market_data_collection_enabled=False,
+                market_data_collection_interval=60,
+                market_data_collection_depth=20,
+            ),
+        )
+
+        create_event = BuyOrderCreatedEvent(
+            timestamp=1642010000,
+            type=OrderType.LIMIT,
+            trading_pair=self.trading_pair,
+            amount=Decimal(1),
+            price=Decimal(1000),
+            order_id="OID1-DUPLICATE-CREATE",
+            creation_timestamp=1640001112.223,
+            exchange_order_id="EOID1",
+        )
+
+        recorder._did_create_order(MarketEvent.BuyOrderCreated.value, self, create_event)
+        recorder._did_create_order(MarketEvent.BuyOrderCreated.value, self, create_event)
+
+        with self.manager.get_new_session() as session:
+            orders = session.query(Order).filter(Order.id == create_event.order_id).all()
+            statuses = session.query(OrderStatus).filter(OrderStatus.order_id == create_event.order_id).all()
+
+        self.assertEqual(1, len(orders))
+        self.assertEqual(1, len(statuses))
+        self.assertEqual(MarketEvent.BuyOrderCreated.name, orders[0].last_status)
+        self.assertEqual("EOID1", orders[0].exchange_order_id)
+
     def test_trade_fee_in_quote_not_available(self):
         recorder = MarketsRecorder(
             sql=self.manager,
@@ -447,6 +484,231 @@ class MarketsRecorderTests(IsolatedAsyncioWrapperTestCase):
             self.assertEqual(MarketEvent.OrderFailure.name, order.last_status)
             self.assertEqual(1, len(order.status))
             self.assertEqual(MarketEvent.OrderFailure.name, order.status[0].status)
+
+    def test_late_create_event_updates_placeholder_without_regressing_terminal_status(self):
+        recorder = MarketsRecorder(
+            sql=self.manager,
+            markets=[self],
+            config_file_path=self.config_file_path,
+            strategy_name=self.strategy_name,
+            market_data_collection=MarketDataCollectionConfigMap(
+                market_data_collection_enabled=False,
+                market_data_collection_interval=60,
+                market_data_collection_depth=20,
+            ),
+        )
+
+        tracked_order = MagicMock()
+        tracked_order.trading_pair = self.trading_pair
+        tracked_order.order_type = OrderType.MARKET
+        tracked_order.amount = Decimal("1")
+        tracked_order.creation_timestamp = 1640001112.223
+        tracked_order.leverage = 1
+        tracked_order.position = PositionAction.NIL
+        tracked_order.price = Decimal("1000")
+        tracked_order.exchange_order_id = None
+        self.get_order = MagicMock(return_value=tracked_order)
+
+        fail_event = MarketOrderFailureEvent(
+            timestamp=1642020000,
+            order_id="OID-LATE-CREATE-1",
+            order_type=OrderType.MARKET,
+            error_message="simulated failure",
+            error_type="TestFailure",
+        )
+        recorder._did_fail_order(MarketEvent.OrderFailure.value, self, fail_event)
+
+        create_event = BuyOrderCreatedEvent(
+            timestamp=1642010000,
+            type=OrderType.MARKET,
+            trading_pair=self.trading_pair,
+            amount=Decimal("1"),
+            price=Decimal("1001"),
+            order_id=fail_event.order_id,
+            creation_timestamp=1640001112.223,
+            exchange_order_id="EOID-LATE-1",
+        )
+        recorder._did_create_order(MarketEvent.BuyOrderCreated.value, self, create_event)
+
+        with self.manager.get_new_session() as session:
+            order = session.query(Order).filter(Order.id == fail_event.order_id).one_or_none()
+            self.assertIsNotNone(order)
+            self.assertEqual(MarketEvent.OrderFailure.name, order.last_status)
+            self.assertEqual("EOID-LATE-1", order.exchange_order_id)
+            self.assertEqual(Decimal("1001"), order.price)
+            statuses = session.query(OrderStatus).filter(OrderStatus.order_id == fail_event.order_id).all()
+
+        self.assertEqual(2, len(statuses))
+        self.assertEqual({MarketEvent.OrderFailure.name, MarketEvent.BuyOrderCreated.name},
+                         {status.status for status in statuses})
+
+    def test_late_create_event_with_same_millisecond_does_not_regress_terminal_status(self):
+        recorder = MarketsRecorder(
+            sql=self.manager,
+            markets=[self],
+            config_file_path=self.config_file_path,
+            strategy_name=self.strategy_name,
+            market_data_collection=MarketDataCollectionConfigMap(
+                market_data_collection_enabled=False,
+                market_data_collection_interval=60,
+                market_data_collection_depth=20,
+            ),
+        )
+
+        tracked_order = MagicMock()
+        tracked_order.trading_pair = self.trading_pair
+        tracked_order.order_type = OrderType.MARKET
+        tracked_order.amount = Decimal("1")
+        tracked_order.creation_timestamp = 1640001112.223
+        tracked_order.leverage = 1
+        tracked_order.position = PositionAction.NIL
+        tracked_order.price = Decimal("1000")
+        tracked_order.exchange_order_id = None
+        self.get_order = MagicMock(return_value=tracked_order)
+
+        fail_event = MarketOrderFailureEvent(
+            timestamp=1640001112.223,
+            order_id="OID-LATE-CREATE-SAME-MS",
+            order_type=OrderType.MARKET,
+            error_message="simulated failure",
+            error_type="TestFailure",
+        )
+        recorder._did_fail_order(MarketEvent.OrderFailure.value, self, fail_event)
+
+        create_event = BuyOrderCreatedEvent(
+            timestamp=1640001112.223,
+            type=OrderType.MARKET,
+            trading_pair=self.trading_pair,
+            amount=Decimal("1"),
+            price=Decimal("1001"),
+            order_id=fail_event.order_id,
+            creation_timestamp=1640001112.223,
+            exchange_order_id="EOID-LATE-SAME-MS",
+        )
+        recorder._did_create_order(MarketEvent.BuyOrderCreated.value, self, create_event)
+
+        with self.manager.get_new_session() as session:
+            order = session.query(Order).filter(Order.id == fail_event.order_id).one_or_none()
+            statuses = session.query(OrderStatus).filter(OrderStatus.order_id == fail_event.order_id).all()
+
+        self.assertIsNotNone(order)
+        self.assertEqual(MarketEvent.OrderFailure.name, order.last_status)
+        self.assertEqual(int(fail_event.timestamp * 1e3), order.last_update_timestamp)
+        self.assertEqual(2, len(statuses))
+
+    def test_late_create_event_after_completed_does_not_regress_terminal_status(self):
+        recorder = MarketsRecorder(
+            sql=self.manager,
+            markets=[self],
+            config_file_path=self.config_file_path,
+            strategy_name=self.strategy_name,
+            market_data_collection=MarketDataCollectionConfigMap(
+                market_data_collection_enabled=False,
+                market_data_collection_interval=60,
+                market_data_collection_depth=20,
+            ),
+        )
+
+        tracked_order = MagicMock()
+        tracked_order.trading_pair = self.trading_pair
+        tracked_order.order_type = OrderType.MARKET
+        tracked_order.amount = Decimal("1")
+        tracked_order.creation_timestamp = 1640001112.223
+        tracked_order.leverage = 1
+        tracked_order.position = PositionAction.NIL
+        tracked_order.price = Decimal("1000")
+        tracked_order.exchange_order_id = None
+        self.get_order = MagicMock(return_value=tracked_order)
+
+        complete_event = BuyOrderCompletedEvent(
+            timestamp=1642020000,
+            order_id="OID-LATE-CREATE-COMPLETED",
+            base_asset=self.base,
+            quote_asset=self.quote,
+            base_asset_amount=Decimal("1"),
+            quote_asset_amount=Decimal("1000"),
+            order_type=OrderType.MARKET,
+        )
+        recorder._did_complete_order(MarketEvent.BuyOrderCompleted.value, self, complete_event)
+
+        create_event = BuyOrderCreatedEvent(
+            timestamp=1642010000,
+            type=OrderType.MARKET,
+            trading_pair=self.trading_pair,
+            amount=Decimal("1"),
+            price=Decimal("1001"),
+            order_id=complete_event.order_id,
+            creation_timestamp=1640001112.223,
+            exchange_order_id="EOID-LATE-COMPLETED",
+        )
+        recorder._did_create_order(MarketEvent.BuyOrderCreated.value, self, create_event)
+
+        with self.manager.get_new_session() as session:
+            order = session.query(Order).filter(Order.id == complete_event.order_id).one_or_none()
+            statuses = session.query(OrderStatus).filter(OrderStatus.order_id == complete_event.order_id).all()
+
+        self.assertIsNotNone(order)
+        self.assertEqual(MarketEvent.BuyOrderCompleted.name, order.last_status)
+        self.assertEqual("EOID-LATE-COMPLETED", order.exchange_order_id)
+        self.assertEqual(Decimal("1001"), order.price)
+        self.assertEqual(2, len(statuses))
+        self.assertEqual({MarketEvent.BuyOrderCompleted.name, MarketEvent.BuyOrderCreated.name},
+                         {status.status for status in statuses})
+
+    def test_late_create_event_after_cancelled_does_not_regress_terminal_status(self):
+        recorder = MarketsRecorder(
+            sql=self.manager,
+            markets=[self],
+            config_file_path=self.config_file_path,
+            strategy_name=self.strategy_name,
+            market_data_collection=MarketDataCollectionConfigMap(
+                market_data_collection_enabled=False,
+                market_data_collection_interval=60,
+                market_data_collection_depth=20,
+            ),
+        )
+
+        tracked_order = MagicMock()
+        tracked_order.trading_pair = self.trading_pair
+        tracked_order.order_type = OrderType.MARKET
+        tracked_order.amount = Decimal("1")
+        tracked_order.creation_timestamp = 1640001112.223
+        tracked_order.leverage = 1
+        tracked_order.position = PositionAction.NIL
+        tracked_order.price = Decimal("1000")
+        tracked_order.exchange_order_id = None
+        self.get_order = MagicMock(return_value=tracked_order)
+
+        cancel_event = OrderCancelledEvent(
+            timestamp=1642020000,
+            order_id="OID-LATE-CREATE-CANCELLED",
+            exchange_order_id="EOID-CANCELLED",
+        )
+        recorder._did_cancel_order(MarketEvent.OrderCancelled.value, self, cancel_event)
+
+        create_event = BuyOrderCreatedEvent(
+            timestamp=1642010000,
+            type=OrderType.MARKET,
+            trading_pair=self.trading_pair,
+            amount=Decimal("1"),
+            price=Decimal("1001"),
+            order_id=cancel_event.order_id,
+            creation_timestamp=1640001112.223,
+            exchange_order_id="EOID-LATE-CANCELLED",
+        )
+        recorder._did_create_order(MarketEvent.BuyOrderCreated.value, self, create_event)
+
+        with self.manager.get_new_session() as session:
+            order = session.query(Order).filter(Order.id == cancel_event.order_id).one_or_none()
+            statuses = session.query(OrderStatus).filter(OrderStatus.order_id == cancel_event.order_id).all()
+
+        self.assertIsNotNone(order)
+        self.assertEqual(MarketEvent.OrderCancelled.name, order.last_status)
+        self.assertEqual("EOID-LATE-CANCELLED", order.exchange_order_id)
+        self.assertEqual(Decimal("1001"), order.price)
+        self.assertEqual(2, len(statuses))
+        self.assertEqual({MarketEvent.OrderCancelled.name, MarketEvent.BuyOrderCreated.name},
+                         {status.status for status in statuses})
 
     @patch("hummingbot.connector.markets_recorder.MarketsRecorder._sleep")
     def test_market_data_collection_enabled(self, sleep_mock):

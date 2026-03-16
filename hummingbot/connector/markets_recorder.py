@@ -373,27 +373,58 @@ class MarketsRecorder:
 
         with self._sql_manager.get_new_session() as session:
             with session.begin():
-                order_record: Order = Order(id=evt.order_id,
-                                            config_file_path=self._config_file_path,
-                                            strategy=self._strategy_name,
-                                            market=market.display_name,
-                                            symbol=evt.trading_pair,
-                                            base_asset=base_asset,
-                                            quote_asset=quote_asset,
-                                            creation_timestamp=timestamp,
-                                            order_type=evt.type.name,
-                                            amount=Decimal(evt.amount),
-                                            leverage=evt.leverage if evt.leverage else 1,
-                                            price=Decimal(evt.price) if evt.price == evt.price else Decimal(0),
-                                            position=evt.position if evt.position else PositionAction.NIL.value,
-                                            last_status=event_type.name,
-                                            last_update_timestamp=timestamp,
-                                            exchange_order_id=evt.exchange_order_id)
-                order_status: OrderStatus = OrderStatus(order=order_record,
-                                                        timestamp=timestamp,
-                                                        status=event_type.name)
-                session.add(order_record)
-                session.add(order_status)
+                order_record: Optional[Order] = session.query(Order).filter(Order.id == evt.order_id).one_or_none()
+                event_price = Decimal(evt.price) if evt.price == evt.price else Decimal(0)
+
+                if order_record is None:
+                    order_record = Order(id=evt.order_id,
+                                         config_file_path=self._config_file_path,
+                                         strategy=self._strategy_name,
+                                         market=market.display_name,
+                                         symbol=evt.trading_pair,
+                                         base_asset=base_asset,
+                                         quote_asset=quote_asset,
+                                         creation_timestamp=timestamp,
+                                         order_type=evt.type.name,
+                                         amount=Decimal(evt.amount),
+                                         leverage=evt.leverage if evt.leverage else 1,
+                                         price=event_price,
+                                         position=evt.position if evt.position else PositionAction.NIL.value,
+                                         last_status=event_type.name,
+                                         last_update_timestamp=timestamp,
+                                         exchange_order_id=evt.exchange_order_id)
+                    session.add(order_record)
+                else:
+                    # A create event can arrive after a placeholder or after a delayed exchange update.
+                    # Treat it as an upsert and never insert a second Order row for the same order_id.
+                    order_record.config_file_path = self._config_file_path
+                    order_record.strategy = self._strategy_name
+                    order_record.market = market.display_name
+                    order_record.symbol = evt.trading_pair
+                    order_record.base_asset = base_asset
+                    order_record.quote_asset = quote_asset
+                    order_record.creation_timestamp = min(order_record.creation_timestamp, timestamp)
+                    order_record.order_type = evt.type.name
+                    order_record.amount = Decimal(evt.amount)
+                    order_record.leverage = evt.leverage if evt.leverage else 1
+                    order_record.price = event_price
+                    order_record.position = evt.position if evt.position else PositionAction.NIL.value
+                    if evt.exchange_order_id is not None:
+                        order_record.exchange_order_id = evt.exchange_order_id
+                    if order_record.last_update_timestamp < timestamp:
+                        order_record.last_status = event_type.name
+                        order_record.last_update_timestamp = timestamp
+
+                existing_status = session.query(OrderStatus).filter(
+                    OrderStatus.order_id == evt.order_id,
+                    OrderStatus.timestamp == timestamp,
+                    OrderStatus.status == event_type.name,
+                ).one_or_none()
+                if existing_status is None:
+                    order_status: OrderStatus = OrderStatus(order=order_record,
+                                                            timestamp=timestamp,
+                                                            status=event_type.name)
+                    session.add(order_status)
                 market.add_exchange_order_ids_from_market_recorder({evt.exchange_order_id: evt.order_id})
                 self.save_market_states(self._config_file_path, market, session=session)
 

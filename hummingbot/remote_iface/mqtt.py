@@ -787,30 +787,28 @@ class MQTTGateway(Node):
 
         try:
             self._restarting = True
-            self.stop(False)
-            await asyncio.sleep(self._INTERVAL_RESTART_SHORT)
+            # Rebuild the bridge from the application layer instead of reusing
+            # the same Node instance after stop(), which can leave the underlying
+            # transport/executor in a shutdown state.
+            if self._hb_app._mqtt is self:
+                await self._hb_app.restart_mqtt_async(timeout=30.0)
 
-            self._publishers = []
-            self._subscribers = []
-            self._rpc_services = []
-            # self._rpc_clients = []
-
-            self.start(False)
-            if self._hb_app.strategy is not None:
-                self.start_market_events_fw()
-
-            await asyncio.sleep(self._INTERVAL_RESTART_SHORT)
-
-            self._restarting = False
-
-            self._health = await self._ev_loop.run_in_executor(
-                None, self._check_connections)
+            active_gateway = self._hb_app._mqtt
+            if active_gateway is not None and active_gateway is not self:
+                if self._hb_app.trading_core.strategy is not None:
+                    active_gateway.start_market_events_fw()
+                self._health = active_gateway.health
+            else:
+                self._health = await self._ev_loop.run_in_executor(
+                    None, self._check_connections)
 
             if self._health:
                 self._hb_app.logger().warning('MQTT Gateway successfully reconnected.')
 
         except Exception as e:
             self._hb_app.logger().error(f'MQTT Gateway failed to reconnect: {e}. Sleeping 10 seconds before retry.')
+        finally:
+            self._restarting = False
 
         await asyncio.sleep(self._INTERVAL_RESTART_LONG)
 

@@ -1548,8 +1548,12 @@ class GatewayHttpClient:
             if not chain:
                 return None, None, f"Could not determine chain for connector '{connector_name}'"
 
-            # Get default network for the chain
-            network = await self.get_default_network_for_chain(chain)
+            # Use connector-specific networks if available, otherwise fall back to chain default
+            connector_networks = connector_info.get("networks", [])
+            if connector_networks:
+                network = connector_networks[0]
+            else:
+                network = await self.get_default_network_for_chain(chain)
             if not network:
                 return None, None, f"Could not get default network for chain '{chain}'"
 

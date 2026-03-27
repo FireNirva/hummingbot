@@ -30,8 +30,8 @@ services:
       - CONFIG_PASSWORD=12345678
       - BROKER_HOST=host.docker.internal
       - BROKER_PORT=1883
-      # - HEADLESS_MODE=true
-      # - CONFIG_FILE_NAME=conf_amm_arb_IRON.yml
+      - HEADLESS_MODE=true
+      - SCRIPT_CONFIG=conf_lp_trend_weth_usdc.yml
 
   gateway:
     restart: always

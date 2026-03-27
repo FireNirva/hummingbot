@@ -487,3 +487,9 @@ class LpTrendRebalancer(LPRebalancer):
             lines.append(line + " " * (box_width - len(line) + 1) + "|")
 
         return lines
+
+
+# Clean up parent class names from module namespace so that
+# inspect.getmembers() in load_controller_configs() only finds
+# LpTrendRebalancerConfig (the most-derived config class).
+del LPRebalancer, LPRebalancerConfig

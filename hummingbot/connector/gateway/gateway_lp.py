@@ -1156,7 +1156,7 @@ class GatewayLp(GatewaySwap):
 
             # Filter positions by pool_address if specified (client-side filtering)
             if pool_address and connector_type == ConnectorType.CLMM:
-                positions = [p for p in positions if hasattr(p, 'pool_address') and p.pool_address == pool_address]
+                positions = [p for p in positions if hasattr(p, 'pool_address') and p.pool_address.lower() == pool_address.lower()]
 
         except Exception as e:
             self.logger().error(f"Error fetching positions: {e}", exc_info=True)

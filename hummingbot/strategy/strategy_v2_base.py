@@ -111,13 +111,16 @@ class StrategyV2ConfigBase(BaseClientModel):
             module_path = f"{settings.CONTROLLERS_MODULE}.{controller_type}.{controller_name}"
             module = importlib.import_module(module_path)
 
-            config_class = next((member for member_name, member in inspect.getmembers(module)
+            config_candidates = [member for member_name, member in inspect.getmembers(module)
                                  if inspect.isclass(member) and member not in [ControllerConfigBase,
                                                                                MarketMakingControllerConfigBase,
                                                                                DirectionalTradingControllerConfigBase]
-                                 and (issubclass(member, ControllerConfigBase))), None)
-            if not config_class:
+                                 and (issubclass(member, ControllerConfigBase))]
+            if not config_candidates:
                 raise InvalidController(f"No configuration class found in the module {controller_name}.")
+            # Pick the most-derived config class (longest MRO) to avoid selecting
+            # a parent config when both parent and child are visible in the module.
+            config_class = max(config_candidates, key=lambda c: len(c.__mro__))
 
             loaded_configs.append(config_class(**config_data))
 

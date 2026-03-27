@@ -1075,12 +1075,12 @@ class GatewayLp(GatewaySwap):
 
             if connector_type == ConnectorType.CLMM:
                 # For CLMM, use positions-owned endpoint
-                # Note: Gateway API doesn't support poolAddress filtering, so we filter client-side
+                # Pass pool_address to also discover gauge-staked positions
                 response = await self._get_gateway_instance().clmm_positions_owned(
                     connector=self.connector_name,
                     network=self.network,
                     wallet_address=self.address,
-                    pool_address=None  # Gateway doesn't support this parameter
+                    pool_address=pool_address,
                 )
             else:
                 # For AMM, we need a pool address

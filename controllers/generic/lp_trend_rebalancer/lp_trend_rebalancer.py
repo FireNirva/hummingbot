@@ -288,6 +288,11 @@ class LpTrendRebalancer(LPRebalancer):
                     keep_position=False,
                 )]
 
+        # --- Wait for resume discovery to complete before creating new positions ---
+        if executor is None and self.config.resume_existing_position and not self._resume_checked:
+            self.logger().debug("Waiting for position discovery before creating new position...")
+            return []
+
         # --- Resume existing position on first run ---
         if executor is None and self._resume_position_address and self._current_executor_id is None:
             self.logger().info(f"Creating resume executor for position {self._resume_position_address}")

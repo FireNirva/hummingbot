@@ -1149,21 +1149,20 @@ class GatewayHttpClient:
         connector: str,
         network: str,
         wallet_address: str,
-        pool_address: Optional[str] = None,  # Not used by API, kept for compatibility
+        pool_address: Optional[str] = None,
         fail_silently: bool = False
     ) -> Dict[str, Any]:
         """
-        Get all CLMM positions owned by a wallet.
+        Get all CLMM positions owned by a wallet (including gauge-staked).
 
-        Note: The Gateway API does not support filtering by pool_address.
-        Filtering must be done client-side.
+        When pool_address is provided, also checks that pool's gauge for staked positions.
         """
         query_params = {
             "network": network,
             "walletAddress": wallet_address,
         }
-        # Note: poolAddress parameter is not supported by Gateway API
-        # Client-side filtering is done in gateway_lp.py
+        if pool_address:
+            query_params["poolAddress"] = pool_address
 
         # Parse connector to get name and type
         connector_name, connector_type = connector.split("/", 1)

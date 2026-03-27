@@ -1,6 +1,9 @@
 services:
   hummingbot:
     container_name: hummingbot
+    depends_on:
+      gateway-init:
+        condition: service_completed_successfully
     image: firenirva/hummingbot:latest
     # build: # Uncomment this build section and comment image to build Hummingbot locally
     #   context: .
@@ -23,25 +26,45 @@ services:
         max-file: "5"
     tty: true
     stdin_open: true
-    network_mode: host
     environment:
       - CONFIG_PASSWORD=12345678
+      - BROKER_HOST=host.docker.internal
+      - BROKER_PORT=1883
       # - HEADLESS_MODE=true
       # - CONFIG_FILE_NAME=conf_amm_arb_IRON.yml
 
   gateway:
-    profiles: ["gateway"]
     restart: always
     container_name: gateway
     image: firenirva/gateway:latest
     # build:
     #   context: ./gateway
     #   dockerfile: Dockerfile
+    ports:
+      - "15888:15888"
     volumes:
-      - "./gateway-files/conf:/home/gateway/conf"
-      - "./gateway-files/logs:/home/gateway/logs"
+      - "./gateway/conf:/home/gateway/conf"
+      - "./gateway/logs:/home/gateway/logs"
       - "./certs:/home/gateway/certs"
-    network_mode: host
     environment:
       - GATEWAY_PASSPHRASE=admin
       - DEV=true
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:15888/config/connectors',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  gateway-init:
+    image: curlimages/curl:latest
+    container_name: gateway-init
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: >
+      sh -c 'curl -s -X POST http://gateway:15888/wallet/setDefault
+      -H "Content-Type: application/json"
+      -d "{\"chain\":\"ethereum\",\"address\":\"0x762ad8e9330117F975f0E18acF9dAE219A4Ed6A0\"}"
+      && echo " wallet set OK"'

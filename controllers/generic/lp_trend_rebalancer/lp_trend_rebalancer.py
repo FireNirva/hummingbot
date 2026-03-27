@@ -120,6 +120,13 @@ class LpTrendRebalancerConfig(LPRebalancerConfig):
         json_schema_extra={"is_updatable": True},
     )
 
+    # --- Resume existing position on startup ---
+    resume_existing_position: bool = Field(
+        default=False,
+        description="If True, on startup query chain for existing positions on this pool and resume managing them",
+        json_schema_extra={"prompt": "Resume existing on-chain position on startup? (true/false):", "prompt_on_new": True},
+    )
+
 
 class LpTrendRebalancer(LPRebalancer):
     """
@@ -167,12 +174,25 @@ class LpTrendRebalancer(LPRebalancer):
         self._position_open_timestamp: Optional[float] = None
         self._position_open_regime: Optional[MarketRegime] = None
 
+        # Periodic status logging
+        self._last_status_log_time: float = 0
+        self._status_log_interval: float = 30  # log every 30 seconds
+
+        # Resume: track whether we've already checked for existing positions
+        self._resume_checked: bool = False
+        self._resume_position_address: Optional[str] = None
+
     # ------------------------------------------------------------------
-    # Override: update_processed_data — add EMA + regime detection
+    # Override: update_processed_data — add EMA + regime detection + resume check
     # ------------------------------------------------------------------
     async def update_processed_data(self):
         # Call parent to update pool price
         await super().update_processed_data()
+
+        # One-time check for existing on-chain positions to resume
+        if self.config.resume_existing_position and not self._resume_checked:
+            self._resume_checked = True
+            await self._discover_existing_position()
 
         # Compute EMA from candle data
         try:
@@ -192,6 +212,38 @@ class LpTrendRebalancer(LPRebalancer):
         except Exception as e:
             self.logger().debug(f"EMA calculation error: {e}")
             self._current_regime = MarketRegime.UNKNOWN
+
+    async def _discover_existing_position(self):
+        """Query chain for existing positions on this pool. Store the best one for resume."""
+        try:
+            connector = self.market_data_provider.get_connector(self.config.connector_name)
+            if not hasattr(connector, 'get_user_positions'):
+                self.logger().warning("Connector does not support get_user_positions — resume disabled")
+                return
+
+            positions = await connector.get_user_positions(pool_address=self.config.pool_address)
+            if not positions:
+                self.logger().info("No existing positions found on chain for this pool")
+                return
+
+            # Pick the position with the highest total value (base * price + quote)
+            best_pos = None
+            best_value = Decimal("0")
+            for pos in positions:
+                value = Decimal(str(pos.base_token_amount)) * Decimal(str(pos.price)) + Decimal(str(pos.quote_token_amount))
+                if value > best_value:
+                    best_value = value
+                    best_pos = pos
+
+            if best_pos:
+                self._resume_position_address = best_pos.address
+                self.logger().info(
+                    f"Found existing position to resume: {best_pos.address}, "
+                    f"range=[{best_pos.lower_price:.2f}, {best_pos.upper_price:.2f}], "
+                    f"value≈${best_value:.2f}"
+                )
+        except Exception as e:
+            self.logger().warning(f"Failed to query existing positions: {e}")
 
     def _detect_regime(self, price: Decimal, ema: Decimal) -> MarketRegime:
         if ema == 0:
@@ -236,6 +288,29 @@ class LpTrendRebalancer(LPRebalancer):
                     keep_position=False,
                 )]
 
+        # --- Resume existing position on first run ---
+        if executor is None and self._resume_position_address and self._current_executor_id is None:
+            self.logger().info(f"Creating resume executor for position {self._resume_position_address}")
+            resume_config = LPExecutorConfig(
+                timestamp=self.market_data_provider.time(),
+                connector_name=self.config.connector_name,
+                trading_pair=self.config.trading_pair,
+                pool_address=self.config.pool_address,
+                lower_price=Decimal("0"),  # will be populated from chain
+                upper_price=Decimal("0"),  # will be populated from chain
+                base_amount=Decimal("0"),
+                quote_amount=Decimal("0"),
+                side=self.config.side,
+                position_offset_pct=self.config.position_offset_pct,
+                resume_position_address=self._resume_position_address,
+                keep_position=False,
+            )
+            self._resume_position_address = None  # consumed
+            return [CreateExecutorAction(
+                controller_id=self.config.id,
+                executor_config=resume_config,
+            )]
+
         # --- Idle in downtrend: block new position creation ---
         if executor is None and self.config.idle_in_downtrend and self._current_regime == MarketRegime.DOWNTREND:
             # Still let parent handle terminated executor cleanup
@@ -251,10 +326,56 @@ class LpTrendRebalancer(LPRebalancer):
             self._position_open_timestamp = None
             self._position_open_regime = None
 
+        # --- Periodic status logging ---
+        now = time.time()
+        if now - self._last_status_log_time >= self._status_log_interval:
+            self._last_status_log_time = now
+            self._log_periodic_status(executor)
+
         # --- Delegate to parent for normal create/rebalance logic ---
         # Override position_width_pct dynamically before parent runs
         self.config.position_width_pct = self._get_regime_width_pct()
         return super().determine_executor_actions()
+
+    def _log_periodic_status(self, executor: Optional[ExecutorInfo]):
+        """Log strategy status every _status_log_interval seconds."""
+        ema_str = f"{float(self._ema_value):.2f}" if self._ema_value else "N/A"
+        close_str = f"{float(self._last_candle_close):.2f}" if self._last_candle_close else "N/A"
+        pool_str = f"{float(self._pool_price):.2f}" if self._pool_price else "N/A"
+
+        if executor:
+            custom = executor.custom_info
+            state = custom.get("state", "UNKNOWN")
+            pos_addr = custom.get("position_address", "N/A")
+            current_price = custom.get("current_price", 0)
+            lower = custom.get("lower_price", 0)
+            upper = custom.get("upper_price", 0)
+            total_value = custom.get("total_value_quote", 0)
+            unrealized_pnl = custom.get("unrealized_pnl_quote", 0)
+            base_fee = custom.get("base_fee", 0)
+            quote_fee = custom.get("quote_fee", 0)
+
+            duration_str = "N/A"
+            if self._position_open_timestamp:
+                elapsed_h = (time.time() - self._position_open_timestamp) / 3600
+                max_h = self._get_max_duration_hours()
+                duration_str = f"{elapsed_h:.1f}h / {max_h}h" if max_h else f"{elapsed_h:.1f}h"
+
+            self.logger().info(
+                f"[STATUS] regime={self._current_regime.value} | EMA({self.config.ema_period})={ema_str} "
+                f"close={close_str} pool={pool_str} | "
+                f"position={pos_addr} state={state} | "
+                f"range=[{lower:.2f}, {upper:.2f}] price={current_price:.2f} | "
+                f"value=${total_value:.2f} pnl=${unrealized_pnl:.2f} | "
+                f"fees={base_fee:.6f}+{quote_fee:.6f} | "
+                f"duration={duration_str} | dd_limit=-{self.config.max_drawdown_pct}%"
+            )
+        else:
+            self.logger().info(
+                f"[STATUS] regime={self._current_regime.value} | EMA({self.config.ema_period})={ema_str} "
+                f"close={close_str} pool={pool_str} | "
+                f"NO ACTIVE POSITION | idle_in_downtrend={self.config.idle_in_downtrend}"
+            )
 
     def _check_force_close(self, executor: ExecutorInfo) -> Optional[str]:
         """Check if position should be force-closed. Returns reason string or None."""

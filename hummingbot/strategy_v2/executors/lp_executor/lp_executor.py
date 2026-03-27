@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, Optional, Union
 
@@ -57,6 +58,8 @@ class LPExecutor(ExecutorBase):
         self._current_retries = 0
         self._max_retries_reached = False  # True when max retries reached, requires intervention
         self._last_attempted_signature: Optional[str] = None  # Track for retry logging
+        self._last_monitor_log_time: float = 0
+        self._monitor_log_interval: float = 30  # log position status every 30 seconds
 
     async def on_start(self):
         """Start executor - will create position in first control_task"""
@@ -79,9 +82,13 @@ class LPExecutor(ExecutorBase):
 
         match self.lp_position_state.state:
             case LPExecutorStates.NOT_ACTIVE:
-                # Start opening position
-                self.lp_position_state.state = LPExecutorStates.OPENING
-                await self._create_position()
+                if self.config.resume_position_address:
+                    # Resume existing on-chain position instead of creating new one
+                    await self._resume_position()
+                else:
+                    # Start opening position
+                    self.lp_position_state.state = LPExecutorStates.OPENING
+                    await self._create_position()
 
             case LPExecutorStates.OPENING:
                 # Position creation in progress or retrying after failure
@@ -96,11 +103,31 @@ class LPExecutor(ExecutorBase):
                 # If max retries reached, stay in CLOSING state waiting for intervention
 
             case LPExecutorStates.IN_RANGE:
-                # Position active and in range - just monitor
-                pass
+                # Position active and in range - periodic monitoring log
+                now = time.time()
+                if now - self._last_monitor_log_time >= self._monitor_log_interval:
+                    self._last_monitor_log_time = now
+                    s = self.lp_position_state
+                    self.logger().info(
+                        f"[MONITOR] IN_RANGE pos={s.position_address} | "
+                        f"price={float(self._current_price):.2f} range=[{float(s.lower_price):.2f}, {float(s.upper_price):.2f}] | "
+                        f"base={float(s.base_amount):.6f} quote={float(s.quote_amount):.2f} | "
+                        f"fees={float(s.base_fee):.6f}+{float(s.quote_fee):.6f}"
+                    )
 
             case LPExecutorStates.OUT_OF_RANGE:
-                # Position active but out of range
+                # Position active but out of range - log every interval
+                now_oor = time.time()
+                if now_oor - self._last_monitor_log_time >= self._monitor_log_interval:
+                    self._last_monitor_log_time = now_oor
+                    s = self.lp_position_state
+                    oor_secs = s.get_out_of_range_seconds(current_time)
+                    self.logger().info(
+                        f"[MONITOR] OUT_OF_RANGE pos={s.position_address} | "
+                        f"price={float(self._current_price):.2f} range=[{float(s.lower_price):.2f}, {float(s.upper_price):.2f}] | "
+                        f"out_of_range={oor_secs}s rebalance_at={self.config.auto_close_above_range_seconds or 'N/A'}s | "
+                        f"base={float(s.base_amount):.6f} quote={float(s.quote_amount):.2f}"
+                    )
                 # Auto-close if configured and duration exceeded (directional)
                 if self._current_price is not None:
                     out_of_range_seconds = self.lp_position_state.get_out_of_range_seconds(current_time)
@@ -317,6 +344,69 @@ class LPExecutor(ExecutorBase):
                 metadata = connector._lp_orders_metadata.get(order_id, {})
                 sig = metadata.get("signature")
             await self._handle_create_failure(e, signature=sig)
+
+    async def _resume_position(self):
+        """
+        Resume monitoring an existing on-chain position instead of creating a new one.
+        Fetches position info from chain and populates executor state directly.
+        """
+        position_address = self.config.resume_position_address
+        self.logger().info(f"Resuming existing position: {position_address}")
+
+        connector = self.connectors.get(self.config.connector_name)
+        if connector is None:
+            self.logger().error(f"Connector {self.config.connector_name} not found")
+            return
+
+        try:
+            position_info = await connector.get_position_info(
+                trading_pair=self.config.trading_pair,
+                position_address=position_address
+            )
+
+            if not position_info:
+                self.logger().error(f"Position {position_address} not found on chain — cannot resume")
+                self._max_retries_reached = True
+                self.lp_position_state.state = LPExecutorStates.OPENING  # park in OPENING for intervention
+                return
+
+            # Populate state from chain data
+            self.lp_position_state.position_address = position_address
+            self.lp_position_state.base_amount = Decimal(str(position_info.base_token_amount))
+            self.lp_position_state.quote_amount = Decimal(str(position_info.quote_token_amount))
+            self.lp_position_state.lower_price = Decimal(str(position_info.lower_price))
+            self.lp_position_state.upper_price = Decimal(str(position_info.upper_price))
+            self.lp_position_state.base_fee = Decimal(str(position_info.base_fee_amount))
+            self.lp_position_state.quote_fee = Decimal(str(position_info.quote_fee_amount))
+
+            # Use current amounts as initial amounts (PnL tracking starts from resume point)
+            current_price = Decimal(str(position_info.price))
+            self._current_price = current_price
+            self.lp_position_state.initial_base_amount = self.lp_position_state.base_amount
+            self.lp_position_state.initial_quote_amount = self.lp_position_state.quote_amount
+            self.lp_position_state.add_mid_price = current_price
+
+            # Update state based on price vs bounds
+            self.lp_position_state.update_state(current_price, self._strategy.current_timestamp)
+
+            self.logger().info(
+                f"Resumed position {position_address}: "
+                f"range=[{self.lp_position_state.lower_price:.2f}, {self.lp_position_state.upper_price:.2f}], "
+                f"price={current_price:.2f}, "
+                f"base={self.lp_position_state.base_amount:.6f}, quote={self.lp_position_state.quote_amount:.2f}, "
+                f"state={self.lp_position_state.state.value}"
+            )
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "position closed" in error_msg or "not found" in error_msg:
+                self.logger().warning(f"Position {position_address} no longer exists on chain: {e}")
+                # Position gone — clear resume flag and let normal flow create new one
+                self.config.resume_position_address = None
+            else:
+                self.logger().error(f"Failed to resume position {position_address}: {e}")
+                self._max_retries_reached = True
+                self.lp_position_state.state = LPExecutorStates.OPENING
 
     async def _handle_create_failure(self, error: Exception, signature: Optional[str] = None):
         """Handle position creation failure with retry logic."""

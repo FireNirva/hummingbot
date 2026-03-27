@@ -62,6 +62,10 @@ class LPExecutorConfig(ExecutorConfigBase):
     # Connector-specific params
     extra_params: Optional[Dict] = None  # e.g., {"strategyType": 0} for Meteora
 
+    # Resume an existing on-chain position instead of opening a new one
+    # When set, executor skips OPENING and directly monitors this position
+    resume_position_address: Optional[str] = None
+
     # Early stop behavior
     keep_position: bool = False  # If True, don't close position on executor stop
 

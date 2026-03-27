@@ -316,8 +316,8 @@ class LpTrendRebalancer(LPRebalancer):
                 executor_config=resume_config,
             )]
 
-        # --- Idle in downtrend: block new position creation ---
-        if executor is None and self.config.idle_in_downtrend and self._current_regime == MarketRegime.DOWNTREND:
+        # --- Idle in downtrend or unknown regime: block new position creation ---
+        if executor is None and self.config.idle_in_downtrend and self._current_regime in (MarketRegime.DOWNTREND, MarketRegime.UNKNOWN):
             # Still let parent handle terminated executor cleanup
             if not self.is_tracked_executor_terminated():
                 return []

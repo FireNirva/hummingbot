@@ -368,6 +368,29 @@ class LPRebalancer(ControllerBase):
         # Calculate amounts based on side
         base_amt, quote_amt = self._calculate_amounts(side, current_price)
 
+        # Pre-flight balance check — avoid sending doomed transactions
+        try:
+            if base_amt > 0:
+                base_balance = self.market_data_provider.get_balance(
+                    self.config.connector_name, self._base_token)
+                if base_balance < base_amt:
+                    self.logger().warning(
+                        f"Insufficient {self._base_token} balance: have {base_balance:.6f}, "
+                        f"need {base_amt:.6f}. Skipping position creation."
+                    )
+                    return None
+            if quote_amt > 0:
+                quote_balance = self.market_data_provider.get_balance(
+                    self.config.connector_name, self._quote_token)
+                if quote_balance < quote_amt:
+                    self.logger().warning(
+                        f"Insufficient {self._quote_token} balance: have {quote_balance:.6f}, "
+                        f"need {quote_amt:.6f}. Skipping position creation."
+                    )
+                    return None
+        except Exception as e:
+            self.logger().debug(f"Balance check failed, proceeding anyway: {e}")
+
         # Calculate bounds
         lower_price, upper_price = self._calculate_price_bounds(side, current_price)
 

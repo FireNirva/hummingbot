@@ -423,6 +423,24 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.active_open_order = None
             return
 
+        # Check if this is a balance/allowance error - retrying won't help
+        is_balance_error = any(msg in error_str for msg in [
+            "INSUFFICIENT_BALANCE",
+            "Insufficient funds",
+            "insufficient funds",
+            "Insufficient balance",
+        ])
+        if is_balance_error:
+            msg = (
+                f"LP OPEN ABORTED for {self.config.trading_pair}: {error}. "
+                f"Will not retry — wallet balance is insufficient."
+            )
+            self.logger().error(msg)
+            self._strategy.notify_hb_app_with_timestamp(msg)
+            self._max_retries_reached = True
+            self.lp_position_state.active_open_order = None
+            return
+
         self._current_retries += 1
         max_retries = self._max_retries
 

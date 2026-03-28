@@ -316,6 +316,12 @@ class LpTrendRebalancer(LPRebalancer):
                 executor_config=resume_config,
             )]
 
+        # --- Periodic status logging (must run before any early return) ---
+        now = time.time()
+        if now - self._last_status_log_time >= self._status_log_interval:
+            self._last_status_log_time = now
+            self._log_periodic_status(executor)
+
         # --- Idle in downtrend or unknown regime: block new position creation ---
         if executor is None and self.config.idle_in_downtrend and self._current_regime in (MarketRegime.DOWNTREND, MarketRegime.UNKNOWN):
             # Still let parent handle terminated executor cleanup
@@ -330,12 +336,6 @@ class LpTrendRebalancer(LPRebalancer):
         if executor is None:
             self._position_open_timestamp = None
             self._position_open_regime = None
-
-        # --- Periodic status logging ---
-        now = time.time()
-        if now - self._last_status_log_time >= self._status_log_interval:
-            self._last_status_log_time = now
-            self._log_periodic_status(executor)
 
         # --- Delegate to parent for normal create/rebalance logic ---
         # Override position_width_pct dynamically before parent runs

@@ -12,7 +12,7 @@ from hummingbot.core.rate_oracle.rate_oracle import RateOracle
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy.strategy_v2_base import StrategyV2Base
 from hummingbot.strategy_v2.executors.executor_base import ExecutorBase
-from hummingbot.strategy_v2.executors.lp_executor.data_types import LPExecutorConfig, LPExecutorState, LPExecutorStates
+from hummingbot.strategy_v2.executors.lp_executor.data_types import LPExecutorConfig, LPExecutorState, LPExecutorStates, RewardClaimRecord
 from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
 
@@ -60,6 +60,7 @@ class LPExecutor(ExecutorBase):
         self._last_attempted_signature: Optional[str] = None  # Track for retry logging
         self._last_monitor_log_time: float = 0
         self._monitor_log_interval: float = 30  # log position status every 30 seconds
+        self._reward_claim_in_progress: bool = False  # Prevent concurrent claims
 
     async def on_start(self):
         """Start executor - will create position in first control_task"""
@@ -112,8 +113,11 @@ class LPExecutor(ExecutorBase):
                         f"[MONITOR] IN_RANGE pos={s.position_address} | "
                         f"price={float(self._current_price):.2f} range=[{float(s.lower_price):.2f}, {float(s.upper_price):.2f}] | "
                         f"base={float(s.base_amount):.6f} quote={float(s.quote_amount):.2f} | "
-                        f"fees={float(s.base_fee):.6f}+{float(s.quote_fee):.6f}"
+                        f"fees={float(s.base_fee):.6f}+{float(s.quote_fee):.6f} | "
+                        f"rewards={float(s.total_rewards_claimed):.4f} AERO (${float(s.total_rewards_claimed_usd):.2f})"
                     )
+                # Periodic reward claiming
+                await self._maybe_claim_rewards()
 
             case LPExecutorStates.OUT_OF_RANGE:
                 # Position active but out of range - log every interval
@@ -128,6 +132,8 @@ class LPExecutor(ExecutorBase):
                         f"out_of_range={oor_secs}s rebalance_at={self.config.auto_close_above_range_seconds or 'N/A'}s | "
                         f"base={float(s.base_amount):.6f} quote={float(s.quote_amount):.2f}"
                     )
+                # Periodic reward claiming (rewards accrue even out of range)
+                await self._maybe_claim_rewards()
                 # Auto-close if configured and duration exceeded (directional)
                 if self._current_price is not None:
                     out_of_range_seconds = self.lp_position_state.get_out_of_range_seconds(current_time)
@@ -526,11 +532,20 @@ class LPExecutor(ExecutorBase):
         """
         Close position by directly awaiting the gateway operation.
         No events needed - result is available immediately after await.
+        Claims any pending gauge rewards before closing.
         """
         connector = self.connectors.get(self.config.connector_name)
         if connector is None:
             self.logger().error(f"Connector {self.config.connector_name} not found")
             return
+
+        # Claim pending rewards before closing (best-effort, don't block close on failure)
+        if self.config.reward_claim_interval_seconds is not None and self.lp_position_state.position_address:
+            try:
+                self.logger().info("Claiming pending rewards before closing position...")
+                await self._claim_rewards()
+            except Exception as e:
+                self.logger().warning(f"Pre-close reward claim failed (continuing with close): {e}")
 
         # Verify position still exists before trying to close (handles timeout-but-succeeded case)
         try:
@@ -681,6 +696,90 @@ class LPExecutor(ExecutorBase):
 
         # Clear active order - state stays CLOSING for retry in next control_task
         self.lp_position_state.active_close_order = None
+
+    async def _maybe_claim_rewards(self):
+        """Check if it's time to claim rewards and do so if configured."""
+        if self.config.reward_claim_interval_seconds is None:
+            return
+        if self._reward_claim_in_progress:
+            return
+        if not self.lp_position_state.position_address:
+            return
+
+        now = time.time()
+        last_claim = self.lp_position_state.last_reward_claim_time
+        if last_claim > 0 and (now - last_claim) < self.config.reward_claim_interval_seconds:
+            return
+
+        await self._claim_rewards()
+
+    async def _claim_rewards(self):
+        """Claim gauge rewards for the current position."""
+        connector = self.connectors.get(self.config.connector_name)
+        if connector is None or not hasattr(connector, 'claim_rewards'):
+            return
+
+        position_address = self.lp_position_state.position_address
+        self._reward_claim_in_progress = True
+
+        try:
+            self.logger().info(f"Claiming gauge rewards for position {position_address}...")
+            result = await connector.claim_rewards(
+                token_id=position_address,
+                pool_address=self.config.pool_address,
+            )
+
+            if not result:
+                self.logger().warning("claim_rewards returned empty result")
+                return
+
+            status = result.get("status")
+            data = result.get("data", {})
+            tx_hash = result.get("signature", "")
+            aero_amount = Decimal(str(data.get("aeroAmount", "0")))
+            gas_fee = Decimal(str(data.get("fee", "0")))
+
+            if status != 1:
+                self.logger().warning(f"Reward claim tx failed: status={status}, tx={tx_hash}")
+                return
+
+            # Get AERO price in USD for valuation
+            aero_usd = Decimal("0")
+            try:
+                rate = RateOracle.get_instance().get_pair_rate("AERO-USDT")
+                if rate and rate > 0:
+                    aero_usd = aero_amount * rate
+            except Exception:
+                pass
+
+            # Record the claim
+            claim_record = RewardClaimRecord(
+                timestamp=time.time(),
+                reward_token="AERO",
+                reward_amount=aero_amount,
+                reward_amount_usd=aero_usd,
+                tx_hash=tx_hash,
+                gas_fee=gas_fee,
+            )
+            self.lp_position_state.reward_claim_history.append(claim_record)
+            self.lp_position_state.total_rewards_claimed += aero_amount
+            self.lp_position_state.total_rewards_claimed_usd += aero_usd
+            self.lp_position_state.last_reward_claim_time = time.time()
+
+            # Add gas fee to cumulative tx_fee
+            self.lp_position_state.tx_fee += gas_fee
+
+            self.logger().info(
+                f"Rewards claimed: {float(aero_amount):.4f} AERO (${float(aero_usd):.2f}) | "
+                f"gas={float(gas_fee):.6f} ETH | tx={tx_hash} | "
+                f"cumulative={float(self.lp_position_state.total_rewards_claimed):.4f} AERO "
+                f"(${float(self.lp_position_state.total_rewards_claimed_usd):.2f})"
+            )
+
+        except Exception as e:
+            self.logger().warning(f"Failed to claim rewards for {position_address}: {e}")
+        finally:
+            self._reward_claim_in_progress = False
 
     def _emit_already_closed_event(self):
         """
@@ -862,6 +961,21 @@ class LPExecutor(ExecutorBase):
             "initial_quote_amount": float(self.lp_position_state.initial_quote_amount
                                           if self.lp_position_state.initial_quote_amount > 0
                                           else self.config.quote_amount),
+            # Gauge reward tracking
+            "total_rewards_claimed": float(self.lp_position_state.total_rewards_claimed),
+            "total_rewards_claimed_usd": float(self.lp_position_state.total_rewards_claimed_usd),
+            "reward_claims_count": len(self.lp_position_state.reward_claim_history),
+            "reward_claim_history": [
+                {
+                    "timestamp": r.timestamp,
+                    "reward_token": r.reward_token,
+                    "reward_amount": float(r.reward_amount),
+                    "reward_amount_usd": float(r.reward_amount_usd),
+                    "tx_hash": r.tx_hash,
+                    "gas_fee": float(r.gas_fee),
+                }
+                for r in self.lp_position_state.reward_claim_history
+            ],
         }
 
     # Required abstract methods from ExecutorBase
@@ -874,12 +988,13 @@ class LPExecutor(ExecutorBase):
         """
         Returns net P&L in global token (USD).
 
-        P&L = (current_position_value + fees_earned) - initial_value
+        P&L = (current_position_value + fees_earned + gauge_rewards_usd) - initial_value - tx_fees
 
         Calculates P&L in pool quote currency, then converts to global token
         for consistent reporting across different pools. Uses stored initial
         amounts and add_mid_price for accurate calculation matching lphistory.
         Works for both open positions and closed positions (using final returned amounts).
+        Includes gauge rewards (AERO) already denominated in USD.
         """
         if self._current_price is None or self._current_price == 0:
             return Decimal("0")
@@ -911,7 +1026,7 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.quote_fee
         )
 
-        # P&L in pool quote currency (before tx fees)
+        # P&L in pool quote currency (before tx fees and rewards)
         pnl_in_quote = current_value + fees_earned - initial_value
 
         # Subtract transaction fees (tx_fee is in native currency, convert to quote)
@@ -919,7 +1034,12 @@ class LPExecutor(ExecutorBase):
         net_pnl_quote = pnl_in_quote - tx_fee_quote
 
         # Convert to global token (USD)
-        return net_pnl_quote * self._get_quote_to_global_rate()
+        net_pnl_usd = net_pnl_quote * self._get_quote_to_global_rate()
+
+        # Add gauge rewards (already in USD)
+        net_pnl_usd += self.lp_position_state.total_rewards_claimed_usd
+
+        return net_pnl_usd
 
     def get_net_pnl_pct(self) -> Decimal:
         """Returns net P&L as percentage of initial investment.

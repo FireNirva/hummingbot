@@ -1144,6 +1144,36 @@ class GatewayHttpClient:
             fail_silently=fail_silently,
         )
 
+    async def clmm_claim_rewards(
+        self,
+        connector: str,
+        network: str,
+        wallet_address: str,
+        token_id: str,
+        pool_address: str,
+        fail_silently: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Claim gauge rewards (e.g., AERO) for a staked CLMM position.
+        """
+        request_payload = {
+            "network": network,
+            "walletAddress": wallet_address,
+            "tokenId": token_id,
+            "poolAddress": pool_address,
+        }
+
+        # Parse connector to get name and type
+        connector_name, connector_type = connector.split("/", 1)
+        path = f"connectors/{connector_name}/{connector_type}/claim-rewards"
+
+        return await self.api_request(
+            "post",
+            path,
+            request_payload,
+            fail_silently=fail_silently,
+        )
+
     async def clmm_positions_owned(
         self,
         connector: str,

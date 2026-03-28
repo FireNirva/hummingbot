@@ -1,8 +1,8 @@
 from decimal import Decimal
 from enum import Enum
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from hummingbot.strategy_v2.executors.data_types import ExecutorConfigBase
 from hummingbot.strategy_v2.models.executors import TrackedOrder
@@ -66,8 +66,23 @@ class LPExecutorConfig(ExecutorConfigBase):
     # When set, executor skips OPENING and directly monitors this position
     resume_position_address: Optional[str] = None
 
+    # Gauge reward claiming
+    reward_claim_interval_seconds: Optional[int] = None  # Auto-claim rewards every N seconds (None = disabled)
+
     # Early stop behavior
     keep_position: bool = False  # If True, don't close position on executor stop
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class RewardClaimRecord(BaseModel):
+    """Record of a single gauge reward claim."""
+    timestamp: float  # Unix timestamp of claim
+    reward_token: str = "AERO"  # Token symbol
+    reward_amount: Decimal = Decimal("0")  # Amount claimed
+    reward_amount_usd: Decimal = Decimal("0")  # USD value at claim time
+    tx_hash: str = ""  # Transaction hash
+    gas_fee: Decimal = Decimal("0")  # Gas fee paid (in native currency, e.g., ETH)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -94,6 +109,12 @@ class LPExecutorState(BaseModel):
     position_rent: Decimal = Decimal("0")  # SOL rent paid to create position (ADD only)
     position_rent_refunded: Decimal = Decimal("0")  # SOL rent refunded on close (REMOVE only)
     tx_fee: Decimal = Decimal("0")  # Transaction fee paid (both ADD and REMOVE)
+
+    # Gauge reward tracking (e.g., AERO on Aerodrome)
+    total_rewards_claimed: Decimal = Decimal("0")  # Cumulative reward tokens claimed
+    total_rewards_claimed_usd: Decimal = Decimal("0")  # Cumulative USD value of claimed rewards
+    reward_claim_history: List[RewardClaimRecord] = Field(default_factory=list)  # Individual claim records
+    last_reward_claim_time: float = 0  # Timestamp of last claim (for scheduling)
 
     # Order tracking
     active_open_order: Optional[TrackedOrder] = None

@@ -58,6 +58,13 @@ class LPRebalancerConfig(ControllerConfigBase):
     buy_price_max: Optional[Decimal] = Field(default=None, json_schema_extra={"is_updatable": True})
     buy_price_min: Optional[Decimal] = Field(default=None, json_schema_extra={"is_updatable": True})
 
+    # Gauge reward claiming (e.g., AERO on Aerodrome)
+    reward_claim_interval_seconds: Optional[int] = Field(
+        default=None,
+        description="Auto-claim gauge rewards every N seconds (None = disabled)",
+        json_schema_extra={"is_updatable": True},
+    )
+
     # Connector-specific params (optional)
     strategy_type: Optional[int] = Field(default=None, json_schema_extra={"is_updatable": True})
 
@@ -438,6 +445,7 @@ class LPRebalancer(ControllerBase):
             position_offset_pct=self.config.position_offset_pct,
             extra_params=extra_params if extra_params else None,
             keep_position=False,
+            reward_claim_interval_seconds=self.config.reward_claim_interval_seconds,
         )
 
     def _calculate_amounts(self, side: int, current_price: Decimal) -> tuple:

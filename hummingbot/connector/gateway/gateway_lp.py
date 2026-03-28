@@ -1162,3 +1162,30 @@ class GatewayLp(GatewaySwap):
             self.logger().error(f"Error fetching positions: {e}", exc_info=True)
 
         return positions
+
+    async def claim_rewards(
+        self,
+        token_id: str,
+        pool_address: str,
+    ) -> Dict[str, Any]:
+        """
+        Claim gauge rewards (e.g., AERO) for a staked CLMM position.
+
+        :param token_id: The NFT token ID of the staked position
+        :param pool_address: The pool address (used to find the gauge)
+        :return: Dict with signature, status, and reward data (aeroAmount, fee)
+        """
+        try:
+            result = await self._get_gateway_instance().clmm_claim_rewards(
+                connector=self.connector_name,
+                network=self.network,
+                wallet_address=self.address,
+                token_id=token_id,
+                pool_address=pool_address,
+            )
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.logger().error(f"Error claiming rewards for position {token_id}: {e}")
+            raise

@@ -309,6 +309,7 @@ class LpTrendRebalancer(LPRebalancer):
                 position_offset_pct=self.config.position_offset_pct,
                 resume_position_address=self._resume_position_address,
                 keep_position=False,
+                reward_claim_interval_seconds=self.config.reward_claim_interval_seconds,
             )
             self._resume_position_address = None  # consumed
             return [CreateExecutorAction(
@@ -359,6 +360,9 @@ class LpTrendRebalancer(LPRebalancer):
             unrealized_pnl = custom.get("unrealized_pnl_quote", 0)
             base_fee = custom.get("base_fee", 0)
             quote_fee = custom.get("quote_fee", 0)
+            rewards_claimed = custom.get("total_rewards_claimed", 0)
+            rewards_usd = custom.get("total_rewards_claimed_usd", 0)
+            rewards_count = custom.get("reward_claims_count", 0)
 
             duration_str = "N/A"
             if self._position_open_timestamp:
@@ -373,6 +377,7 @@ class LpTrendRebalancer(LPRebalancer):
                 f"range=[{lower:.2f}, {upper:.2f}] price={current_price:.2f} | "
                 f"value=${total_value:.2f} pnl=${unrealized_pnl:.2f} | "
                 f"fees={base_fee:.6f}+{quote_fee:.6f} | "
+                f"rewards={rewards_claimed:.4f} AERO (${rewards_usd:.2f}, {rewards_count} claims) | "
                 f"duration={duration_str} | dd_limit=-{self.config.max_drawdown_pct}%"
             )
         else:

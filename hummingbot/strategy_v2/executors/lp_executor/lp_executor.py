@@ -266,6 +266,9 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.position_rent = metadata.get("position_rent", Decimal("0"))
             self.lp_position_state.tx_fee = metadata.get("tx_fee", Decimal("0"))
 
+            # Set reward claim time to now so first claim waits for full interval
+            self.lp_position_state.last_reward_claim_time = time.time()
+
             # Position is created - clear open order and reset retries
             self.lp_position_state.active_open_order = None
             self._current_retries = 0
@@ -391,6 +394,9 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.initial_base_amount = self.lp_position_state.base_amount
             self.lp_position_state.initial_quote_amount = self.lp_position_state.quote_amount
             self.lp_position_state.add_mid_price = current_price
+
+            # Set reward claim time so first claim waits for full interval
+            self.lp_position_state.last_reward_claim_time = time.time()
 
             # Update state based on price vs bounds
             self.lp_position_state.update_state(current_price, self._strategy.current_timestamp)

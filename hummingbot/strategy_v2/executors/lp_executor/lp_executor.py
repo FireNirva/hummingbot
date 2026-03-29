@@ -539,13 +539,8 @@ class LPExecutor(ExecutorBase):
             self.logger().error(f"Connector {self.config.connector_name} not found")
             return
 
-        # Claim pending rewards before closing (best-effort, don't block close on failure)
-        if self.config.reward_claim_interval_seconds is not None and self.lp_position_state.position_address:
-            try:
-                self.logger().info("Claiming pending rewards before closing position...")
-                await self._claim_rewards()
-            except Exception as e:
-                self.logger().warning(f"Pre-close reward claim failed (continuing with close): {e}")
+        # Note: AERO reward claiming before close is handled by gateway closePosition
+        # (it calls gauge.getReward before gauge.withdraw)
 
         # Verify position still exists before trying to close (handles timeout-but-succeeded case)
         try:
@@ -711,6 +706,8 @@ class LPExecutor(ExecutorBase):
         if last_claim > 0 and (now - last_claim) < self.config.reward_claim_interval_seconds:
             return
 
+        # Update timestamp BEFORE attempting claim to prevent rapid retries on failure
+        self.lp_position_state.last_reward_claim_time = now
         await self._claim_rewards()
 
     async def _claim_rewards(self):
@@ -764,7 +761,6 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.reward_claim_history.append(claim_record)
             self.lp_position_state.total_rewards_claimed += aero_amount
             self.lp_position_state.total_rewards_claimed_usd += aero_usd
-            self.lp_position_state.last_reward_claim_time = time.time()
 
             # Add gas fee to cumulative tx_fee
             self.lp_position_state.tx_fee += gas_fee

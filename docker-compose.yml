@@ -19,6 +19,8 @@ services:
       - ./certs:/home/hummingbot/certs
       - ./scripts:/home/hummingbot/scripts
       - ./controllers:/home/hummingbot/controllers
+      - ./hummingbot/strategy_v2/executors/lp_executor:/home/hummingbot/hummingbot/strategy_v2/executors/lp_executor
+      - ./hummingbot/connector/gateway/gateway_lp.py:/home/hummingbot/hummingbot/connector/gateway/gateway_lp.py
     logging:
       driver: "json-file"
       options:
@@ -36,10 +38,10 @@ services:
   gateway:
     restart: always
     container_name: gateway
-    image: firenirva/gateway:latest
-    # build:
-    #   context: ./gateway
-    #   dockerfile: Dockerfile
+    # image: firenirva/gateway:latest
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
     ports:
       - "15888:15888"
     volumes:

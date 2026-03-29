@@ -74,6 +74,8 @@ class CLMMPositionInfo(BaseModel):
     lower_price: float = Field(alias="lowerPrice")
     upper_price: float = Field(alias="upperPrice")
     price: float
+    reward_token_address: Optional[str] = Field(default=None, alias="rewardTokenAddress")
+    reward_amount: Optional[float] = Field(default=None, alias="rewardAmount")
     base_token: Optional[str] = None
     quote_token: Optional[str] = None
 

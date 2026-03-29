@@ -114,7 +114,8 @@ class LPExecutor(ExecutorBase):
                         f"price={float(self._current_price):.2f} range=[{float(s.lower_price):.2f}, {float(s.upper_price):.2f}] | "
                         f"base={float(s.base_amount):.6f} quote={float(s.quote_amount):.2f} | "
                         f"fees={float(s.base_fee):.6f}+{float(s.quote_fee):.6f} | "
-                        f"rewards={float(s.total_rewards_claimed):.4f} AERO (${float(s.total_rewards_claimed_usd):.2f})"
+                        f"pending_rewards={float(s.pending_rewards):.6f} AERO | "
+                        f"claimed={float(s.total_rewards_claimed):.4f} AERO (${float(s.total_rewards_claimed_usd):.2f})"
                     )
                 # Periodic reward claiming
                 await self._maybe_claim_rewards()
@@ -184,6 +185,9 @@ class LPExecutor(ExecutorBase):
                 self.lp_position_state.upper_price = Decimal(str(position_info.upper_price))
                 # Update current price from position_info (avoids separate pool_info call)
                 self._current_price = Decimal(str(position_info.price))
+                # Update pending gauge rewards if available
+                if hasattr(position_info, 'reward_amount') and position_info.reward_amount is not None:
+                    self.lp_position_state.pending_rewards = Decimal(str(position_info.reward_amount))
             else:
                 self.logger().warning(f"get_position_info returned None for {self.lp_position_state.position_address}")
         except Exception as e:
@@ -266,8 +270,9 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.position_rent = metadata.get("position_rent", Decimal("0"))
             self.lp_position_state.tx_fee = metadata.get("tx_fee", Decimal("0"))
 
-            # Set reward claim time to now so first claim waits for full interval
-            self.lp_position_state.last_reward_claim_time = time.time()
+            # First reward claim after 1 hour, then every reward_claim_interval_seconds
+            interval = self.config.reward_claim_interval_seconds or 0
+            self.lp_position_state.last_reward_claim_time = time.time() - max(0, interval - 3600)
 
             # Position is created - clear open order and reset retries
             self.lp_position_state.active_open_order = None
@@ -395,8 +400,9 @@ class LPExecutor(ExecutorBase):
             self.lp_position_state.initial_quote_amount = self.lp_position_state.quote_amount
             self.lp_position_state.add_mid_price = current_price
 
-            # Set reward claim time so first claim waits for full interval
-            self.lp_position_state.last_reward_claim_time = time.time()
+            # First reward claim after 1 hour, then every reward_claim_interval_seconds
+            interval = self.config.reward_claim_interval_seconds or 0
+            self.lp_position_state.last_reward_claim_time = time.time() - max(0, interval - 3600)
 
             # Update state based on price vs bounds
             self.lp_position_state.update_state(current_price, self._strategy.current_timestamp)

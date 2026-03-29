@@ -77,8 +77,20 @@ class LpTrendRebalancerConfig(LPRebalancerConfig):
         json_schema_extra={"is_updatable": True},
     )
     ema_downtrend_threshold_pct: Decimal = Field(
-        default=Decimal("0.5"),
-        description="Price must be this % below EMA to count as downtrend",
+        default=Decimal("1.2"),
+        description="Price must be this % below EMA to ENTER downtrend (hysteresis entry)",
+        json_schema_extra={"is_updatable": True},
+    )
+    ema_downtrend_exit_threshold_pct: Decimal = Field(
+        default=Decimal("1.2"),
+        description="Price must recover to within this % of EMA to EXIT downtrend (hysteresis exit). "
+                    "Set equal to entry threshold for symmetric behavior, or lower for sticky downtrend.",
+        json_schema_extra={"is_updatable": True},
+    )
+    regime_confirm_seconds: int = Field(
+        default=7200,
+        description="Seconds a new regime must persist before it is confirmed (debounce). "
+                    "0 = instant switching. 7200 = 2 hours.",
         json_schema_extra={"is_updatable": True},
     )
 
@@ -128,6 +140,11 @@ class LpTrendRebalancerConfig(LPRebalancerConfig):
     )
 
 
+# Force Pydantic v2 to rebuild the validator schema so that fields added in this
+# subclass are not rejected as "extra" when the parent uses extra='forbid'.
+LpTrendRebalancerConfig.model_rebuild()
+
+
 class LpTrendRebalancer(LPRebalancer):
     """
     LP controller with EMA-based trend detection.
@@ -165,8 +182,12 @@ class LpTrendRebalancer(LPRebalancer):
         super().__init__(config, *args, **kwargs)
         self.config: LpTrendRebalancerConfig = config
 
-        # Regime state
-        self._current_regime: MarketRegime = MarketRegime.UNKNOWN
+        # Regime state with hysteresis + debounce
+        self._current_regime: MarketRegime = MarketRegime.UNKNOWN  # confirmed regime
+        self._raw_regime: MarketRegime = MarketRegime.UNKNOWN  # instantaneous (pre-debounce)
+        self._pending_regime: MarketRegime = MarketRegime.UNKNOWN  # candidate awaiting confirmation
+        self._pending_regime_since: float = 0.0  # timestamp when pending regime started
+        self._in_downtrend_hysteresis: bool = False  # hysteresis state for downtrend
         self._ema_value: Optional[Decimal] = None
         self._last_candle_close: Optional[Decimal] = None
 
@@ -206,7 +227,8 @@ class LpTrendRebalancer(LPRebalancer):
                 ema = df["close"].ewm(span=self.config.ema_period, adjust=False).mean()
                 self._ema_value = Decimal(str(ema.iloc[-1]))
                 self._last_candle_close = Decimal(str(df["close"].iloc[-1]))
-                self._current_regime = self._detect_regime(self._last_candle_close, self._ema_value)
+                self._raw_regime = self._detect_regime_raw(self._last_candle_close, self._ema_value)
+                self._apply_regime_debounce()
             else:
                 self._current_regime = MarketRegime.UNKNOWN
         except Exception as e:
@@ -245,16 +267,79 @@ class LpTrendRebalancer(LPRebalancer):
         except Exception as e:
             self.logger().warning(f"Failed to query existing positions: {e}")
 
-    def _detect_regime(self, price: Decimal, ema: Decimal) -> MarketRegime:
+    def _detect_regime_raw(self, price: Decimal, ema: Decimal) -> MarketRegime:
+        """Detect regime with hysteresis on the downtrend threshold.
+
+        Uses different thresholds for entering vs exiting downtrend to prevent
+        flapping when price oscillates near the boundary.
+
+        - Enter downtrend: deviation < -ema_downtrend_threshold_pct (e.g. -1.2%)
+        - Exit downtrend:  deviation > -ema_downtrend_exit_threshold_pct (e.g. -1.2%)
+        """
         if ema == 0:
             return MarketRegime.UNKNOWN
         deviation_pct = (price - ema) / ema * Decimal("100")
-        if deviation_pct > self.config.ema_uptrend_threshold_pct:
-            return MarketRegime.UPTREND
-        elif deviation_pct < -self.config.ema_downtrend_threshold_pct:
-            return MarketRegime.DOWNTREND
+
+        if not self._in_downtrend_hysteresis:
+            # Not in downtrend: need to cross entry threshold to enter
+            if deviation_pct < -self.config.ema_downtrend_threshold_pct:
+                self._in_downtrend_hysteresis = True
+                return MarketRegime.DOWNTREND
+            elif deviation_pct > self.config.ema_uptrend_threshold_pct:
+                return MarketRegime.UPTREND
+            else:
+                return MarketRegime.SIDEWAYS
         else:
-            return MarketRegime.SIDEWAYS
+            # In downtrend: need to cross exit threshold to leave
+            if deviation_pct > -self.config.ema_downtrend_exit_threshold_pct:
+                self._in_downtrend_hysteresis = False
+                if deviation_pct > self.config.ema_uptrend_threshold_pct:
+                    return MarketRegime.UPTREND
+                return MarketRegime.SIDEWAYS
+            else:
+                return MarketRegime.DOWNTREND
+
+    def _apply_regime_debounce(self):
+        """Apply debounce: require regime to persist for confirm_seconds before switching.
+
+        This prevents rapid regime flips caused by price noise near thresholds.
+        The drawdown stop-loss provides protection during the debounce period.
+        """
+        now = time.time()
+        confirm_secs = self.config.regime_confirm_seconds
+
+        if confirm_secs <= 0 or self._current_regime == MarketRegime.UNKNOWN:
+            # No debounce, or first detection after EMA warmup — instant switching
+            if self._raw_regime != self._current_regime:
+                prev = self._current_regime
+                self._current_regime = self._raw_regime
+                self.logger().info(
+                    f"Regime changed: {prev.value} → {self._current_regime.value} "
+                    f"({'warmup complete' if prev == MarketRegime.UNKNOWN else 'instant'})"
+                )
+            return
+
+        if self._raw_regime == self._current_regime:
+            # Stable — reset pending
+            self._pending_regime = self._current_regime
+            self._pending_regime_since = now
+            return
+
+        if self._raw_regime != self._pending_regime:
+            # New candidate — start timer
+            self._pending_regime = self._raw_regime
+            self._pending_regime_since = now
+            return
+
+        # Same candidate persisting — check if confirmed
+        elapsed = now - self._pending_regime_since
+        if elapsed >= confirm_secs:
+            prev = self._current_regime
+            self._current_regime = self._pending_regime
+            self.logger().info(
+                f"Regime confirmed: {prev.value} → {self._current_regime.value} "
+                f"(held for {elapsed:.0f}s, threshold={confirm_secs}s)"
+            )
 
     # ------------------------------------------------------------------
     # Override: determine_executor_actions — add regime/duration/drawdown
@@ -377,14 +462,21 @@ class LpTrendRebalancer(LPRebalancer):
                 f"range=[{lower:.2f}, {upper:.2f}] price={current_price:.2f} | "
                 f"value=${total_value:.2f} pnl=${unrealized_pnl:.2f} | "
                 f"fees={base_fee:.6f}+{quote_fee:.6f} | "
-                f"rewards={rewards_claimed:.4f} AERO (${rewards_usd:.2f}, {rewards_count} claims) | "
-                f"duration={duration_str} | dd_limit=-{self.config.max_drawdown_pct}%"
+                f"rewards={rewards_claimed:.6f} AERO (${rewards_usd:.2f}, {rewards_count} claims) | "
+                f"duration={duration_str} | dd_limit=-{self.config.max_drawdown_pct}% | "
+                f"reward_cfg={self.config.reward_claim_interval_seconds}"
             )
         else:
+            debounce_info = ""
+            if self._raw_regime != self._current_regime:
+                elapsed = time.time() - self._pending_regime_since if self._pending_regime_since else 0
+                debounce_info = (f" | pending={self._raw_regime.value} "
+                                 f"({elapsed:.0f}s/{self.config.regime_confirm_seconds}s)")
             self.logger().info(
                 f"[STATUS] regime={self._current_regime.value} | EMA({self.config.ema_period})={ema_str} "
                 f"close={close_str} pool={pool_str} | "
                 f"NO ACTIVE POSITION | idle_in_downtrend={self.config.idle_in_downtrend}"
+                f"{debounce_info}"
             )
 
     def _check_force_close(self, executor: ExecutorInfo) -> Optional[str]:

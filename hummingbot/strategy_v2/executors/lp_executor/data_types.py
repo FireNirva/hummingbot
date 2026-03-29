@@ -111,6 +111,7 @@ class LPExecutorState(BaseModel):
     tx_fee: Decimal = Decimal("0")  # Transaction fee paid (both ADD and REMOVE)
 
     # Gauge reward tracking (e.g., AERO on Aerodrome)
+    pending_rewards: Decimal = Decimal("0")  # Pending unclaimed rewards (updated from chain each tick)
     total_rewards_claimed: Decimal = Decimal("0")  # Cumulative reward tokens claimed
     total_rewards_claimed_usd: Decimal = Decimal("0")  # Cumulative USD value of claimed rewards
     reward_claim_history: List[RewardClaimRecord] = Field(default_factory=list)  # Individual claim records

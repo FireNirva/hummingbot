@@ -680,15 +680,29 @@ class LPExecutor(ExecutorBase):
         sig_info = f" [sig: {signature}]" if signature else ""
 
         if self._current_retries >= max_retries:
+            pos_addr = self.lp_position_state.position_address
             msg = (
                 f"LP CLOSE FAILED after {max_retries} retries for {self.config.trading_pair}.{sig_info} "
-                f"Position {self.lp_position_state.position_address} may need manual close. Error: {error}"
+                f"Position {pos_addr} may need manual close. Error: {error}"
             )
             self.logger().error(msg)
             self._strategy.notify_hb_app_with_timestamp(msg)
             self._max_retries_reached = True
-            # Keep state as CLOSING - don't shut down, wait for user intervention
+            # Revert to monitoring state so the position remains tracked.
+            # This prevents the controller from losing sight of the position.
+            # The position stays on-chain; the controller can re-attempt close
+            # on the next regime change or the user can close manually.
             self.lp_position_state.active_close_order = None
+            self.lp_position_state.state = LPExecutorStates.IN_RANGE
+            self._status = RunnableStatus.RUNNING
+            self.close_type = CloseType.POSITION_HOLD
+            self.logger().info(
+                f"Reverted to monitoring mode for position {pos_addr}. "
+                "Position remains open on-chain. Will retry close on next trigger."
+            )
+            # Reset retries so future close attempts can try again
+            self._current_retries = 0
+            self._max_retries_reached = False
             return
 
         if is_timeout:

@@ -984,6 +984,7 @@ class LPExecutor(ExecutorBase):
                                           if self.lp_position_state.initial_quote_amount > 0
                                           else self.config.quote_amount),
             # Gauge reward tracking
+            "pending_rewards": float(self.lp_position_state.pending_rewards),
             "total_rewards_claimed": float(self.lp_position_state.total_rewards_claimed),
             "total_rewards_claimed_usd": float(self.lp_position_state.total_rewards_claimed_usd),
             "reward_claims_count": len(self.lp_position_state.reward_claim_history),

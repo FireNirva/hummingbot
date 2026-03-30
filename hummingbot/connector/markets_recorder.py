@@ -284,6 +284,31 @@ class MarketsRecorder:
             executors = session.query(Executors).all()
             return [executor.to_executor_info() for executor in executors]
 
+    def get_latest_executor_custom_info(self, controller_id: str, position_address: str) -> Optional[Dict]:
+        """
+        Find the most recent executor for a given controller that managed a specific position address.
+        Returns the custom_info dict if found, None otherwise.
+        Used to restore reward claim history when resuming a position after restart.
+        """
+        with self._sql_manager.get_new_session() as session:
+            executors = (
+                session.query(Executors)
+                .filter(Executors.controller_id == controller_id)
+                .order_by(Executors.timestamp.desc())
+                .all()
+            )
+            for executor in executors:
+                custom_info = executor.custom_info
+                if isinstance(custom_info, dict):
+                    # Check if this executor managed the same position
+                    config = executor.config
+                    if isinstance(config, dict) and config.get("resume_position_address") == position_address:
+                        return custom_info
+                    # Also check by position_address in custom_info itself
+                    if custom_info.get("position_address") == position_address:
+                        return custom_info
+            return None
+
     def get_positions_by_ids(self, position_ids: List[str]) -> List[Position]:
         with self._sql_manager.get_new_session() as session:
             positions = session.query(Position).filter(Position.id.in_(position_ids)).all()

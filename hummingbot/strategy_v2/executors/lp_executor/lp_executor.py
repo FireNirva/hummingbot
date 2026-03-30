@@ -61,6 +61,8 @@ class LPExecutor(ExecutorBase):
         self._last_monitor_log_time: float = 0
         self._monitor_log_interval: float = 30  # log position status every 30 seconds
         self._reward_claim_in_progress: bool = False  # Prevent concurrent claims
+        self._last_db_save_time: float = 0
+        self._db_save_interval: float = 300  # Persist executor state to DB every 5 minutes
 
     async def on_start(self):
         """Start executor - will create position in first control_task"""
@@ -158,6 +160,13 @@ class LPExecutor(ExecutorBase):
             case LPExecutorStates.COMPLETE:
                 # Position closed - close_type already set by early_stop()
                 self.stop()
+
+        # Periodic DB save to persist reward state and avoid data loss on crash
+        if self.lp_position_state.position_address:
+            now_save = time.time()
+            if now_save - self._last_db_save_time >= self._db_save_interval:
+                self._last_db_save_time = now_save
+                self._save_state_to_db()
 
     async def _update_position_info(self):
         """Fetch current position info from connector to update amounts and fees"""
@@ -362,7 +371,7 @@ class LPExecutor(ExecutorBase):
     async def _resume_position(self):
         """
         Resume monitoring an existing on-chain position instead of creating a new one.
-        Fetches position info from chain and populates executor state directly.
+        Fetches position info from chain and restores reward claim history from DB.
         """
         position_address = self.config.resume_position_address
         self.logger().info(f"Resuming existing position: {position_address}")
@@ -404,6 +413,9 @@ class LPExecutor(ExecutorBase):
             interval = self.config.reward_claim_interval_seconds or 0
             self.lp_position_state.last_reward_claim_time = time.time() - max(0, interval - 3600)
 
+            # Restore reward claim history from previous executor in DB
+            self._restore_reward_history_from_db(position_address)
+
             # Update state based on price vs bounds
             self.lp_position_state.update_state(current_price, self._strategy.current_timestamp)
 
@@ -412,6 +424,7 @@ class LPExecutor(ExecutorBase):
                 f"range=[{self.lp_position_state.lower_price:.2f}, {self.lp_position_state.upper_price:.2f}], "
                 f"price={current_price:.2f}, "
                 f"base={self.lp_position_state.base_amount:.6f}, quote={self.lp_position_state.quote_amount:.2f}, "
+                f"rewards_restored={float(self.lp_position_state.total_rewards_claimed):.6f} AERO, "
                 f"state={self.lp_position_state.state.value}"
             )
 
@@ -425,6 +438,72 @@ class LPExecutor(ExecutorBase):
                 self.logger().error(f"Failed to resume position {position_address}: {e}")
                 self._max_retries_reached = True
                 self.lp_position_state.state = LPExecutorStates.OPENING
+
+    def _restore_reward_history_from_db(self, position_address: str):
+        """
+        Restore reward claim history from the most recent previous executor that managed
+        this position. This preserves reward tracking across restarts.
+        """
+        try:
+            from hummingbot.connector.markets_recorder import MarketsRecorder
+            recorder = MarketsRecorder.get_instance()
+            if recorder is None:
+                self.logger().warning("MarketsRecorder not available — cannot restore reward history")
+                return
+
+            custom_info = recorder.get_latest_executor_custom_info(
+                controller_id=self.config.controller_id,
+                position_address=position_address,
+            )
+
+            if not custom_info:
+                self.logger().info(f"No previous reward history found in DB for position {position_address}")
+                return
+
+            # Restore cumulative reward totals
+            total_claimed = custom_info.get("total_rewards_claimed", 0)
+            total_claimed_usd = custom_info.get("total_rewards_claimed_usd", 0)
+            claim_history = custom_info.get("reward_claim_history", [])
+
+            if total_claimed > 0 or claim_history:
+                self.lp_position_state.total_rewards_claimed = Decimal(str(total_claimed))
+                self.lp_position_state.total_rewards_claimed_usd = Decimal(str(total_claimed_usd))
+
+                # Restore individual claim records
+                for record in claim_history:
+                    self.lp_position_state.reward_claim_history.append(
+                        RewardClaimRecord(
+                            timestamp=record.get("timestamp", 0),
+                            reward_token=record.get("reward_token", "AERO"),
+                            reward_amount=Decimal(str(record.get("reward_amount", 0))),
+                            reward_amount_usd=Decimal(str(record.get("reward_amount_usd", 0))),
+                            tx_hash=record.get("tx_hash", ""),
+                            gas_fee=Decimal(str(record.get("gas_fee", 0))),
+                        )
+                    )
+
+                self.logger().info(
+                    f"Restored reward history from DB: "
+                    f"{float(self.lp_position_state.total_rewards_claimed):.6f} AERO "
+                    f"(${float(self.lp_position_state.total_rewards_claimed_usd):.2f}) "
+                    f"from {len(claim_history)} claims"
+                )
+        except Exception as e:
+            self.logger().warning(f"Failed to restore reward history from DB: {e}")
+
+    def _save_state_to_db(self):
+        """
+        Periodically persist executor state to DB so reward claims and other
+        runtime data survive crashes/restarts.
+        """
+        try:
+            from hummingbot.connector.markets_recorder import MarketsRecorder
+            recorder = MarketsRecorder.get_instance()
+            if recorder is None:
+                return
+            recorder.store_or_update_executor(self)
+        except Exception as e:
+            self.logger().debug(f"Periodic DB save failed (non-critical): {e}")
 
     async def _handle_create_failure(self, error: Exception, signature: Optional[str] = None):
         """Handle position creation failure with retry logic."""
@@ -797,6 +876,9 @@ class LPExecutor(ExecutorBase):
                 f"cumulative={float(self.lp_position_state.total_rewards_claimed):.4f} AERO "
                 f"(${float(self.lp_position_state.total_rewards_claimed_usd):.2f})"
             )
+
+            # Immediately persist to DB after successful claim to prevent data loss
+            self._save_state_to_db()
 
         except Exception as e:
             self.logger().warning(f"Failed to claim rewards for {position_address}: {e}")

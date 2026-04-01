@@ -3,6 +3,7 @@ import sys
 import types
 from decimal import Decimal
 from unittest import TestCase
+from unittest.mock import AsyncMock, patch
 
 from hummingbot.client.settings import AllConnectorSettings
 
@@ -33,3 +34,48 @@ class GatewayHttpClientTests(TestCase):
 
         self.assertEqual(Decimal("0"), connector_settings.trade_fee_schema.maker_percent_fee_decimal)
         self.assertEqual(Decimal("0"), connector_settings.trade_fee_schema.taker_percent_fee_decimal)
+
+    def test_get_connector_chain_network_prefers_chain_default_when_supported(self):
+        connectors_response = {
+            "connectors": [
+                {"name": "aerodrome", "chain": "ethereum", "networks": ["base", "optimism"]},
+            ]
+        }
+
+        with patch.object(self.client, "get_connectors", AsyncMock(return_value=connectors_response)), \
+                patch.object(self.client, "get_default_network_for_chain", AsyncMock(return_value="base")):
+            chain, network, error = asyncio.run(self.client.get_connector_chain_network("aerodrome/clmm"))
+
+        self.assertEqual("ethereum", chain)
+        self.assertEqual("base", network)
+        self.assertIsNone(error)
+
+    def test_get_connector_chain_network_falls_back_to_first_connector_network(self):
+        connectors_response = {
+            "connectors": [
+                {"name": "aerodrome", "chain": "ethereum", "networks": ["base", "optimism"]},
+            ]
+        }
+
+        with patch.object(self.client, "get_connectors", AsyncMock(return_value=connectors_response)), \
+                patch.object(self.client, "get_default_network_for_chain", AsyncMock(return_value="arbitrum")):
+            chain, network, error = asyncio.run(self.client.get_connector_chain_network("aerodrome/clmm"))
+
+        self.assertEqual("ethereum", chain)
+        self.assertEqual("base", network)
+        self.assertIsNone(error)
+
+    def test_get_connector_chain_network_uses_chain_default_when_connector_has_no_networks(self):
+        connectors_response = {
+            "connectors": [
+                {"name": "aerodrome", "chain": "ethereum", "networks": []},
+            ]
+        }
+
+        with patch.object(self.client, "get_connectors", AsyncMock(return_value=connectors_response)), \
+                patch.object(self.client, "get_default_network_for_chain", AsyncMock(return_value="base")):
+            chain, network, error = asyncio.run(self.client.get_connector_chain_network("aerodrome/clmm"))
+
+        self.assertEqual("ethereum", chain)
+        self.assertEqual("base", network)
+        self.assertIsNone(error)

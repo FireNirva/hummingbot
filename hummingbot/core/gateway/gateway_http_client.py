@@ -1577,12 +1577,17 @@ class GatewayHttpClient:
             if not chain:
                 return None, None, f"Could not determine chain for connector '{connector_name}'"
 
-            # Use connector-specific networks if available, otherwise fall back to chain default
+            # Prefer the chain's defaultNetwork (set in ethereum.yml etc.) when it
+            # is among the connector's supported networks.  Fall back to the first
+            # supported network, then to the chain default.
             connector_networks = connector_info.get("networks", [])
-            if connector_networks:
+            default_network = await self.get_default_network_for_chain(chain)
+            if default_network and default_network in connector_networks:
+                network = default_network
+            elif connector_networks:
                 network = connector_networks[0]
             else:
-                network = await self.get_default_network_for_chain(chain)
+                network = default_network
             if not network:
                 return None, None, f"Could not get default network for chain '{chain}'"
 
